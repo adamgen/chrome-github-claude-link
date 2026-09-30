@@ -1,0 +1,146 @@
+:root {
+  --fg: #1f1e1d;
+  --muted: #6b6a68;
+  --bg: #faf9f5;
+  --card: #ffffff;
+  --border: #e5e2d9;
+  --accent: #d97757;
+  --accent-strong: #b4532f;
+  --danger: #b42318;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #f0eee6;
+    --muted: #a6a39b;
+    --bg: #1f1e1d;
+    --card: #2a2927;
+    --border: #3b3a37;
+    --accent-strong: #f0a585;
+    --danger: #f97066;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+body {
+  width: 400px;
+  margin: 0;
+  padding: 12px;
+  font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+}
+header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+h1 {
+  flex: 1;
+  margin: 0;
+  font-size: 15px;
+}
+button {
+  font: inherit;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--fg);
+  cursor: pointer;
+}
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+button.danger {
+  color: var(--danger);
+}
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.status {
+  margin: 8px 0;
+  color: var(--muted);
+  font-size: 12px;
+  min-height: 1.4em;
+}
+.status.error {
+  color: var(--danger);
+}
+input[type="search"] {
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--fg);
+  font: inherit;
+}
+.list {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+  max-height: 360px;
+  overflow-y: auto;
+}
+.list li {
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  margin-bottom: 6px;
+}
+.list a {
+  color: inherit;
+  text-decoration: none;
+}
+.list a:hover {
+  text-decoration: underline;
+}
+.pr {
+  font-weight: 600;
+}
+.session {
+  display: block;
+  margin-top: 2px;
+  color: var(--accent-strong) !important;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kind {
+  float: right;
+  font-size: 11px;
+  color: var(--muted);
+}
+.empty {
+  color: var(--muted);
+}
+.empty a {
+  color: var(--accent-strong);
+}
+.settings {
+  margin-top: 8px;
+  color: var(--muted);
+}
+.settings summary {
+  cursor: pointer;
+}
+.settings label {
+  display: block;
+  margin: 6px 0;
+  color: var(--fg);
+}
+.settings input[type="number"] {
+  width: 64px;
+}
+.row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
