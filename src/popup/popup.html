@@ -9,26 +9,35 @@
     <header>
       <img src="../../icons/icon32.png" width="20" height="20" alt="" />
       <h1>Claude Code ↔ PRs</h1>
-      <button id="sync" type="button" class="primary">Sync now</button>
+      <span id="live" class="live" title="Watching local Claude Code sessions"></span>
     </header>
 
     <p id="status" class="status" role="status"></p>
+
+    <div id="setup" class="setup" hidden>
+      <b>Connect to your local Claude Code sessions</b>
+      <p>The extension reads <code>~/.claude/projects</code> through a small helper program. Install it once:</p>
+      <ol>
+        <li>Open a terminal in the extension folder.</li>
+        <li>Run <code>npm run install-host</code>.</li>
+        <li>Restart Chrome.</li>
+      </ol>
+      <p class="error-detail" id="setupError"></p>
+    </div>
 
     <input id="filter" type="search" placeholder="Filter by repo, PR number or session title" autocomplete="off" />
 
     <ul id="list" class="list"></ul>
     <p id="empty" class="empty" hidden>
-      No links yet. Open <a href="https://claude.ai/code" target="_blank" rel="noopener">claude.ai/code</a> or press
-      <b>Sync now</b> to read your sessions.
+      No PR links found in your local Claude Code sessions yet. New sessions show up here within about 30 seconds.
     </p>
 
     <details class="settings">
       <summary>Settings</summary>
-      <label><input type="checkbox" id="autoSync" /> Sync automatically while claude.ai is open</label>
       <label>
-        Sync every
-        <input type="number" id="syncIntervalMinutes" min="5" max="1440" step="5" />
-        minutes
+        Check for session changes every
+        <input type="number" id="pollSeconds" min="30" max="3600" step="30" />
+        seconds
       </label>
       <label><input type="checkbox" id="matchBranch" /> Match PRs by the branch a session pushed to</label>
       <label><input type="checkbox" id="showMentioned" /> Also link sessions that only mention a PR</label>

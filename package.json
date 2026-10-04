@@ -1,12 +1,14 @@
 {
   "name": "chrome-github-claude-link",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Chrome extension linking GitHub pull requests to the Claude Code sessions that produced them.",
+  "description": "Chrome extension linking GitHub pull requests to the local Claude Code sessions that produced them.",
   "scripts": {
     "test": "node --test test/*.test.js",
     "test:e2e": "node e2e/run.js",
     "icons": "node scripts/generate-icons.mjs",
+    "install-host": "node host/install.js",
+    "uninstall-host": "node host/install.js --uninstall",
     "package": "rm -f dist/extension.zip && mkdir -p dist && zip -r dist/extension.zip manifest.json icons src"
   },
   "license": "MIT"

@@ -19,12 +19,26 @@ test("extractPrRefs dedupes and ignores non-PR links", () => {
   assert.deepEqual(refs.map((r) => r.key), ["acme/web#42", "x/y.z#7"]);
 });
 
-test("extractSessionLinks and sessionIdFromUrl", () => {
+test("extractSessionLinks", () => {
   const body = "Claude-Session: https://claude.ai/code/session_01KefahWkEG7rViphChTTmky\nfoo";
   assert.deepEqual(C.extractSessionLinks(body), ["session_01KefahWkEG7rViphChTTmky"]);
-  assert.equal(C.sessionIdFromUrl("https://claude.ai/code/session_01KefahWkEG7rViphChTTmky?m=0"), "session_01KefahWkEG7rViphChTTmky");
-  assert.equal(C.sessionIdFromUrl("https://claude.ai/chat/abc"), null);
-  assert.equal(C.sessionIdFromUrl("https://evil.com/code/session_01KefahWkEG7rViphChTTmky"), null);
+});
+
+test("sessionLink opens local sessions in the Claude app", () => {
+  const local = C.sessionLink({ id: "cac1984e-66bd-5015-a04a-a43bcf158e80", cwd: "/Users/me/my repo" });
+  assert.equal(local.app, true);
+  assert.equal(local.url, "claude://resume?session=cac1984e-66bd-5015-a04a-a43bcf158e80&cwd=%2FUsers%2Fme%2Fmy+repo");
+  const parsed = new URL(local.url);
+  assert.equal(parsed.searchParams.get("cwd"), "/Users/me/my repo");
+
+  const cloud = C.sessionLink({ id: "session_01KefahWkEG7rViphChTTmky" });
+  assert.deepEqual(cloud, { url: "https://claude.ai/code/session_01KefahWkEG7rViphChTTmky", app: false });
+});
+
+test("sessionTitle falls back to the first prompt", () => {
+  assert.equal(C.sessionTitle({ title: "T", firstPrompt: "P" }), "T");
+  assert.equal(C.sessionTitle({ firstPrompt: "P" }), "P");
+  assert.equal(C.sessionTitle({}), null);
 });
 
 test("normalizeRepo", () => {
@@ -34,28 +48,12 @@ test("normalizeRepo", () => {
   assert.equal(C.normalizeRepo("nope"), null);
 });
 
-test("summarizeApiSession pulls repo and outcome branches", () => {
-  const s = C.summarizeApiSession({
-    id: "session_abcdefgh12",
-    title: "Fix bug",
-    session_status: "idle",
-    created_at: "2026-09-01T00:00:00Z",
-    updated_at: "2026-09-02T00:00:00Z",
-    session_context: {
-      sources: [{ type: "git_repository", url: "https://github.com/acme/web", revision: "main" }],
-      outcomes: [{ type: "git_repository", git_info: { type: "github", repo: "acme/web", branches: ["claude/fix-bug-x1"] } }],
-    },
-  });
-  assert.deepEqual(s.repos, ["acme/web"]);
-  assert.deepEqual(s.branches, ["claude/fix-bug-x1"]);
-  assert.equal(s.status, "idle");
-});
-
 test("classifyEventPrRefs marks PR creation", () => {
   const created = C.classifyEventPrRefs(
     JSON.stringify({ type: "tool_result", name: "mcp__github__create_pull_request", url: "https://github.com/a/b/pull/1" }),
   );
   assert.equal(created[0].kind, "created");
+  assert.equal(C.classifyEventPrRefs("Opened a PR: https://github.com/a/b/pull/3")[0].kind, "created");
   const mentioned = C.classifyEventPrRefs(JSON.stringify({ text: "look at https://github.com/a/b/pull/2" }));
   assert.equal(mentioned[0].kind, "mentioned");
 });
@@ -86,6 +84,7 @@ test("findSessionsForPr matches by stored relation and by head branch", () => {
     ["session_mention001", "mentioned"],
   ]);
   assert.equal(found[0].url, "https://claude.ai/code/session_branch0001");
+  assert.equal(found[0].app, false);
 
   const noBranch = C.findSessionsForPr(db, { owner: "acme", repo: "web", number: 9, headBranch: "claude/x" }, { matchBranch: false });
   assert.deepEqual(noBranch.map((f) => f.id), ["session_mention001"]);
@@ -108,4 +107,15 @@ test("listRelations flattens newest first", () => {
   const rows = C.listRelations(db);
   assert.deepEqual(rows.map((r) => r.number), [2, 1]);
   assert.equal(rows[0].prUrl, "https://github.com/a/b/pull/2");
+});
+
+test("findSessionsForPr ranks app sessions above web ones of the same kind", () => {
+  const db = C.emptyDb();
+  C.upsertSession(db, { id: "session_cloud00001", updatedAt: "2026-09-02" });
+  C.upsertSession(db, { id: "0b1c2d3e-0000-0000-0000-000000000000", cwd: "/w", updatedAt: "2026-09-01" });
+  C.addRelation(db, "session_cloud00001", { owner: "a", repo: "b", number: 1 }, "created", "x");
+  C.addRelation(db, "0b1c2d3e-0000-0000-0000-000000000000", { owner: "a", repo: "b", number: 1 }, "created", "local");
+  const found = C.findSessionsForPr(db, { owner: "a", repo: "b", number: 1 });
+  assert.deepEqual(found.map((f) => f.app), [true, false]);
+  assert.match(found[0].url, /^claude:\/\/resume\?session=0b1c2d3e/);
 });

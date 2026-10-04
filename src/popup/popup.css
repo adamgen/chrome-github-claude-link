@@ -144,3 +144,53 @@ input[type="search"] {
   gap: 8px;
   margin-top: 8px;
 }
+.live {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.live.ok {
+  background: #2da44e;
+}
+.live.busy {
+  background: var(--accent);
+  animation: pulse 1s ease-in-out infinite;
+}
+.live.error {
+  background: var(--danger);
+}
+@keyframes pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+.setup {
+  padding: 10px;
+  margin-bottom: 8px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--card);
+}
+.setup p,
+.setup ol {
+  margin: 6px 0;
+}
+.setup ol {
+  padding-left: 20px;
+}
+code {
+  font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--bg);
+}
+.error-detail {
+  color: var(--muted);
+  font-size: 11px;
+}
+.app {
+  font-size: 11px;
+  color: var(--muted);
+  margin-left: 4px;
+}

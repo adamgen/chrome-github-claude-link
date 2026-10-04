@@ -1,6 +1,6 @@
 /*
- * Pure helpers shared by the background worker, content scripts, popup and
- * unit tests. No chrome.* APIs in here.
+ * Pure helpers shared by the background worker, content script, native host
+ * and unit tests. No chrome.* APIs in here.
  *
  * Loaded as a classic script (content scripts / importScripts) where it sets
  * `globalThis.CGL`, and as a CommonJS module under Node for tests.
@@ -77,19 +77,35 @@
     return [...out];
   }
 
-  function sessionIdFromUrl(href) {
-    try {
-      const url = new URL(href, CLAUDE_ORIGIN);
-      if (!/(^|\.)claude\.ai$/i.test(url.hostname)) return null;
-      const m = /^\/code\/(session_[A-Za-z0-9]{8,64})(?:\/|$)/.exec(url.pathname);
-      return m ? m[1] : null;
-    } catch (_) {
-      return null;
-    }
-  }
-
   function sessionUrl(sessionId) {
     return `${CLAUDE_ORIGIN}/code/${sessionId}`;
+  }
+
+  /**
+   * Deep link that opens a local Claude Code session in the Claude desktop
+   * app. Same URL Claude Code's own `/desktop` command opens.
+   */
+  function desktopResumeUrl(sessionId, cwd) {
+    const url = new URL("claude://resume");
+    url.searchParams.set("session", sessionId);
+    if (cwd) url.searchParams.set("cwd", cwd);
+    return url.toString();
+  }
+
+  /**
+   * Where a session link should go: local sessions (we know their cwd) open
+   * in the Claude app; cloud sessions (session_… ids) open on claude.ai.
+   */
+  function sessionLink(session) {
+    const s = session || {};
+    if (s.cwd && !/^session_/.test(s.id)) return { url: desktopResumeUrl(s.id, s.cwd), app: true };
+    return { url: sessionUrl(s.id), app: false };
+  }
+
+  /** Title to show for a session. */
+  function sessionTitle(session) {
+    const s = session || {};
+    return s.title || s.firstPrompt || null;
   }
 
   /** `https://github.com/o/r(.git)` or `o/r` → `o/r` (lowercased), else null. */
@@ -103,39 +119,6 @@
   }
 
   /**
-   * Reduce a raw `/v1/sessions` item to what we store: title, repo and the
-   * branches the session pushes to (its "outcomes").
-   */
-  function summarizeApiSession(raw) {
-    if (!raw || !raw.id) return null;
-    const ctx = raw.session_context || {};
-    const repos = new Set();
-    const branches = new Set();
-    for (const src of ctx.sources || []) {
-      if (src && src.type === "git_repository") {
-        const r = normalizeRepo(src.url);
-        if (r) repos.add(r);
-      }
-    }
-    for (const out of ctx.outcomes || []) {
-      const info = out && out.git_info;
-      if (!info) continue;
-      const r = normalizeRepo(info.repo);
-      if (r) repos.add(r);
-      for (const b of info.branches || []) if (b) branches.add(String(b));
-    }
-    return {
-      id: raw.id,
-      title: raw.title || null,
-      status: raw.session_status || raw.status || null,
-      repos: [...repos],
-      branches: [...branches],
-      createdAt: raw.created_at || null,
-      updatedAt: raw.updated_at || null,
-    };
-  }
-
-  /**
    * Decide how a PR relates to a session from one event's JSON: a URL that
    * appears next to a PR-creation tool call is "created", anything else is
    * "mentioned".
@@ -143,9 +126,10 @@
   function classifyEventPrRefs(eventJson) {
     const refs = extractPrRefs(eventJson);
     if (!refs.length) return [];
-    const created = /create_pull_request|gh pr create|pull request created|created (?:a )?(?:draft )?(?:pull request|PR)\b/i.test(
-      eventJson,
-    );
+    const created =
+      /create_pull_request|gh pr create|pull request (?:created|opened)|(?:created|opened) (?:a |the )?(?:draft )?(?:pull request|PR)\b/i.test(
+        eventJson,
+      );
     return refs.map((r) => ({ ...r, kind: created ? "created" : "mentioned" }));
   }
 
@@ -224,12 +208,14 @@
     }
     return [...found.values()]
       .map((r) => {
-        const s = db.sessions[r.id] || {};
-        return { ...r, title: s.title || null, url: sessionUrl(r.id), updatedAt: s.updatedAt || null };
+        const s = db.sessions[r.id] || { id: r.id };
+        const link = sessionLink(s);
+        return { ...r, title: sessionTitle(s), url: link.url, app: link.app, cwd: s.cwd || null, updatedAt: s.updatedAt || null };
       })
       .sort(
         (a, b) =>
           (KIND_RANK[a.kind] ?? 99) - (KIND_RANK[b.kind] ?? 99) ||
+          Number(b.app) - Number(a.app) ||
           String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")),
       );
   }
@@ -239,7 +225,8 @@
     const rows = [];
     for (const [key, pr] of Object.entries(db.prs)) {
       for (const [id, rel] of Object.entries(pr.sessions)) {
-        const s = db.sessions[id] || {};
+        const s = db.sessions[id] || { id };
+        const link = sessionLink(s);
         rows.push({
           prKey: key,
           prUrl: prUrl(pr.owner, pr.repo, pr.number),
@@ -247,8 +234,9 @@
           repo: pr.repo,
           number: pr.number,
           sessionId: id,
-          sessionUrl: sessionUrl(id),
-          sessionTitle: s.title || null,
+          sessionUrl: link.url,
+          app: link.app,
+          sessionTitle: sessionTitle(s),
           kind: rel.kind,
           sources: rel.sources || [],
           lastSeen: rel.lastSeen || 0,
@@ -267,10 +255,11 @@
     parsePrUrl,
     extractPrRefs,
     extractSessionLinks,
-    sessionIdFromUrl,
     sessionUrl,
+    desktopResumeUrl,
+    sessionLink,
+    sessionTitle,
     normalizeRepo,
-    summarizeApiSession,
     classifyEventPrRefs,
     strongerKind,
     emptyDb,

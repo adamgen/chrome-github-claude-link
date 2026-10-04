@@ -2,6 +2,8 @@
  * Runs on github.com. On a pull request page it adds a link to the Claude
  * Code session(s) behind the PR next to the title; everywhere else it adds a
  * small Claude icon after pull request links that have a known session.
+ * Local sessions open in the Claude desktop app (claude://resume deep link),
+ * cloud sessions open on claude.ai.
  *
  * It also records "backlinks": claude.ai/code/session_… URLs that appear in a
  * PR's description or commits (Claude Code adds these by default).
@@ -133,7 +135,23 @@
   }
 
   function sessionLabel(s) {
-    return s.title || s.id.replace(/^session_/, "session ").slice(0, 20) + "…";
+    return s.title || `session ${s.id.replace(/^session_/, "").slice(0, 8)}…`;
+  }
+
+  /** Point `a` at the session: app deep links open in place, web links in a new tab. */
+  function linkTo(a, s) {
+    a.href = s.url;
+    if (s.app) {
+      a.removeAttribute("target");
+    } else {
+      a.target = "_blank";
+      a.rel = "noopener";
+    }
+    return a;
+  }
+
+  function whereItOpens(s) {
+    return s.app ? `Opens in the Claude app${s.cwd ? ` (${s.cwd})` : ""}` : "Opens on claude.ai";
   }
 
   function buildHeaderWidget(sessions) {
@@ -142,16 +160,13 @@
     wrap.dataset.cglHeader = "1";
 
     const [first, ...rest] = sessions;
-    const main = document.createElement("a");
+    const main = linkTo(document.createElement("a"), first);
     main.className = "cgl-chip";
-    main.href = first.url;
-    main.target = "_blank";
-    main.rel = "noopener";
-    main.title = `Open the Claude Code session that ${KIND_LABEL[first.kind] || "relates to this PR"}\n${first.title || first.id}`;
+    main.title = `The Claude Code session that ${KIND_LABEL[first.kind] || "relates to this PR"}\n${sessionLabel(first)}\n${whereItOpens(first)}`;
     main.innerHTML = ICON_SVG;
     const label = document.createElement("span");
     label.className = "cgl-chip-label";
-    label.textContent = "Claude Code";
+    label.textContent = first.app ? "Open in Claude" : "Claude Code (web)";
     const sub = document.createElement("span");
     sub.className = "cgl-chip-sub";
     sub.textContent = sessionLabel(first);
@@ -167,15 +182,13 @@
       const list = document.createElement("div");
       list.className = "cgl-menu";
       for (const s of rest) {
-        const a = document.createElement("a");
-        a.href = s.url;
-        a.target = "_blank";
-        a.rel = "noopener";
+        const a = linkTo(document.createElement("a"), s);
         a.className = "cgl-menu-item";
+        a.title = whereItOpens(s);
         const t = document.createElement("span");
         t.textContent = sessionLabel(s);
         const k = document.createElement("small");
-        k.textContent = KIND_LABEL[s.kind] || s.kind;
+        k.textContent = `${KIND_LABEL[s.kind] || s.kind} · ${s.app ? "Claude app" : "claude.ai"}`;
         a.append(t, k);
         list.append(a);
       }
@@ -205,7 +218,7 @@
     const now = currentPr();
     if (!now || prKey(now.owner, now.repo, now.number) !== key) return; // navigated away meanwhile
     const sessions = results[key] || [];
-    const sig = sessions.map((s) => `${s.id}:${s.kind}:${s.title}`).join("|");
+    const sig = sessions.map((s) => `${s.id}:${s.kind}:${s.title}:${s.url}`).join("|");
     const stillMounted = [...existing].some((e) => e.isConnected);
     if (sig === headerState.sig && (stillMounted || !sessions.length)) return;
     existing.forEach((e) => e.remove());
@@ -254,12 +267,9 @@
       if (next && next.classList.contains("cgl-inline")) next.remove();
       if (!sessions.length || !a.isConnected) continue;
       const s = sessions[0];
-      const link = document.createElement("a");
+      const link = linkTo(document.createElement("a"), s);
       link.className = "cgl-inline";
-      link.href = s.url;
-      link.target = "_blank";
-      link.rel = "noopener";
-      link.title = `Claude Code session: ${s.title || s.id}${sessions.length > 1 ? ` (+${sessions.length - 1} more)` : ""}`;
+      link.title = `Claude Code session: ${sessionLabel(s)}${sessions.length > 1 ? ` (+${sessions.length - 1} more)` : ""}\n${whereItOpens(s)}`;
       link.setAttribute("aria-label", link.title);
       link.innerHTML = ICON_SVG;
       a.after(link);

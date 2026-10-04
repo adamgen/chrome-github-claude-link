@@ -2,7 +2,7 @@
   "use strict";
   const $ = (id) => document.getElementById(id);
   const KIND_LABEL = { branch: "branch", created: "opened", backlink: "backlink", mentioned: "mentioned" };
-  const SETTING_IDS = ["autoSync", "syncIntervalMinutes", "matchBranch", "showMentioned"];
+  const SETTING_IDS = ["pollSeconds", "matchBranch", "showMentioned"];
 
   let relations = [];
 
@@ -13,7 +13,8 @@
   function ago(ts) {
     if (!ts) return "never";
     const s = Math.round((Date.now() - ts) / 1000);
-    if (s < 60) return "just now";
+    if (s < 10) return "just now";
+    if (s < 60) return `${s}s ago`;
     if (s < 3600) return `${Math.round(s / 60)} min ago`;
     if (s < 86400) return `${Math.round(s / 3600)} h ago`;
     return new Date(ts).toLocaleDateString();
@@ -27,12 +28,12 @@
   function renderStatus(o) {
     const r = o.lastResult;
     const counts = `${o.prCount} PR${o.prCount === 1 ? "" : "s"} · ${o.sessionCount} session${o.sessionCount === 1 ? "" : "s"}`;
-    if (r && !r.ok) {
-      const hint = r.status === 401 || r.status === 403 ? " — are you signed in to claude.ai?" : "";
-      setStatus(`${counts} · last sync failed: ${r.error}${hint}`, true);
-    } else {
-      setStatus(`${counts} · synced ${ago(o.lastSyncAt)}`);
-    }
+    $("live").className = `live ${o.polling ? "busy" : r && !r.ok ? "error" : r ? "ok" : ""}`;
+    $("setup").hidden = !(r && !r.ok && r.hostMissing);
+    $("setupError").textContent = r && r.hostMissing ? `Chrome said: ${r.error}` : "";
+    if (o.polling && !o.lastScanAt) setStatus(`${counts} · reading local sessions…`);
+    else if (r && !r.ok) setStatus(`${counts} · ${r.hostMissing ? "helper not installed" : `scan failed: ${r.error}`}`, true);
+    else setStatus(`${counts} · checked ${ago(o.lastScanAt)}${r && r.projectsDir ? ` · ${r.projectsDir}` : ""}`);
   }
 
   function renderList() {
@@ -44,8 +45,7 @@
         (r.sessionTitle || "").toLowerCase().includes(q) ||
         r.sessionId.toLowerCase().includes(q),
     );
-    const list = $("list");
-    list.replaceChildren(
+    $("list").replaceChildren(
       ...rows.slice(0, 200).map((r) => {
         const li = document.createElement("li");
         const kind = document.createElement("span");
@@ -60,9 +60,21 @@
         const session = document.createElement("a");
         session.className = "session";
         session.href = r.sessionUrl;
-        session.target = "_blank";
         session.textContent = r.sessionTitle || r.sessionId;
-        li.append(kind, pr, session);
+        session.title = r.app ? "Open in the Claude app" : "Open on claude.ai";
+        if (r.app) {
+          // Popups cannot navigate to external protocols themselves.
+          session.addEventListener("click", (e) => {
+            e.preventDefault();
+            chrome.tabs.update({ url: r.sessionUrl });
+          });
+        } else {
+          session.target = "_blank";
+        }
+        const where = document.createElement("span");
+        where.className = "app";
+        where.textContent = r.app ? "app" : "web";
+        li.append(kind, pr, where, session);
         return li;
       }),
     );
@@ -77,6 +89,7 @@
     renderList();
     for (const id of SETTING_IDS) {
       const el = $(id);
+      if (document.activeElement === el) continue;
       if (el.type === "checkbox") el.checked = !!o.settings[id];
       else el.value = o.settings[id];
     }
@@ -84,33 +97,15 @@
 
   $("filter").addEventListener("input", renderList);
 
-  $("sync").addEventListener("click", async () => {
-    $("sync").disabled = true;
-    setStatus("Syncing…");
-    const res = await send({ type: "cgl:sync-now" });
-    if (!res.ok) {
-      $("sync").disabled = false;
-      setStatus(`Could not start sync: ${res.error || res.reason}`, true);
-    } else if (res.via === "new-tab") {
-      setStatus("Opened claude.ai in a background tab to sync…");
-    }
-  });
-
   chrome.runtime.onMessage.addListener((msg) => {
-    if (!msg || msg.type !== "cgl:progress") return;
-    if (msg.done) {
-      $("sync").disabled = false;
-      load();
-    } else if (msg.total) {
-      setStatus(`Scanning sessions… ${msg.done}/${msg.total}`);
-    }
+    if (msg && msg.type === "cgl:scanned") load();
   });
 
   for (const id of SETTING_IDS) {
     $(id).addEventListener("change", (e) => {
       const el = e.target;
       let value = el.type === "checkbox" ? el.checked : Number(el.value);
-      if (id === "syncIntervalMinutes") value = Math.min(1440, Math.max(5, value || 15));
+      if (id === "pollSeconds") value = Math.min(3600, Math.max(30, value || 30));
       send({ type: "cgl:settings", settings: { [id]: value } });
     });
   }
@@ -126,10 +121,12 @@
   });
 
   $("clear").addEventListener("click", async () => {
-    if (!confirm("Delete all stored session ↔ PR links?")) return;
+    if (!confirm("Delete all stored session ↔ PR links? They are rebuilt from your local sessions.")) return;
     await send({ type: "cgl:clear" });
     load();
   });
 
-  load();
+  // Opening the popup also checks for changes right away.
+  load().then(() => send({ type: "cgl:poll" }));
+  setInterval(load, 5000);
 })();
