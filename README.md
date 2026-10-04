@@ -70,6 +70,9 @@ Requirements: Chrome 120 or later (or Chromium, Brave, Edge, Arc), Node.js 18 or
    the `node` you ran it with. If you use a custom `CLAUDE_CONFIG_DIR`, set it before you run the command.
 3. Restart Chrome. Open the extension popup: the dot turns green and your sessions appear within a few seconds.
 
+To check that deep links open the Claude app, run `npm run demo-link`. It prints the link for your most recently
+active local session; paste it into the Chrome address bar.
+
 The first time you click a deep link, Chrome asks whether to open the Claude app. Tick **Always allow** to skip
 this prompt next time.
 

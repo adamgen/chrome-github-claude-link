@@ -9,6 +9,7 @@
     "icons": "node scripts/generate-icons.mjs",
     "install-host": "node host/install.js",
     "uninstall-host": "node host/install.js --uninstall",
+    "demo-link": "node scripts/demo-link.js",
     "package": "rm -f dist/extension.zip && mkdir -p dist && zip -r dist/extension.zip manifest.json icons src"
   },
   "license": "MIT"
