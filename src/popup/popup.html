@@ -39,8 +39,8 @@
         <input type="number" id="pollSeconds" min="30" max="3600" step="30" />
         seconds
       </label>
-      <label><input type="checkbox" id="matchBranch" /> Match PRs by the branch a session pushed to</label>
-      <label><input type="checkbox" id="showMentioned" /> Also link sessions that only mention a PR</label>
+      <label><input type="checkbox" id="matchBranch" /> Link sessions that edited, committed or pushed on the PR's branch</label>
+      <label><input type="checkbox" id="showMentioned" /> Also link sessions that only mention the PR's URL (noisy)</label>
       <div class="row">
         <button id="export" type="button">Export JSON</button>
         <button id="clear" type="button" class="danger">Clear data</button>

@@ -21,6 +21,14 @@ const MAX_PRS_PER_SESSION = 200;
 const SKIPPED_TYPES = new Set(["attachment", "queue-operation", "file-history-snapshot"]);
 // File contents the session read or wrote are not things it did on GitHub.
 const FILE_TOOLS = new Set(["Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "Grep", "Glob"]);
+// Tools that change the working tree: using one means the session worked on the checked-out branch.
+const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
+// Matched against each shell command segment (see shellSegments), not the raw text,
+// so scripts that merely contain "git push" in a string do not count.
+const GIT_WORK_RE = /^(?:git(?:\s+-C\s+\S+)?\s+(?:commit|push|merge|rebase|cherry-pick|revert|am)|gh\s+pr\s+create)\b/;
+const BRANCH_RE = /^(?!\.|-)(?!.*\.\.)(?!.*\.lock$)[A-Za-z0-9._\/-]+$/;
+// One tool result or message listing more PRs than this is a listing (e.g. `gh pr list`), not a reference.
+const MAX_MENTIONS_PER_BLOCK = 3;
 
 function claudeConfigDir(env = process.env) {
   return env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
@@ -88,7 +96,48 @@ function isCreatePrCall(block) {
 }
 
 function mentions(text) {
-  return extractPrRefs(text).map((r) => ({ ...r, kind: "mentioned" }));
+  const refs = extractPrRefs(text);
+  if (refs.length > MAX_MENTIONS_PER_BLOCK) return [];
+  return refs.map((r) => ({ ...r, kind: "mentioned" }));
+}
+
+/** The individual commands of a shell command line (split on newlines, &&, ||, ;, |). */
+function shellSegments(command) {
+  return String(command || "")
+    .split(/\n|&&|\|\||;|\|/)
+    .map((seg) => seg.trim())
+    .filter(Boolean);
+}
+
+function isGitWork(command) {
+  return shellSegments(command).some((seg) => GIT_WORK_RE.test(seg));
+}
+
+/** Branches named as push targets in a shell command (`git push -u origin feat/x`, `HEAD:feat/x`). */
+function pushedBranches(command) {
+  const out = [];
+  for (const seg of shellSegments(command)) {
+    const m = /^git(?:\s+-C\s+\S+)?\s+push\b(.*)$/.exec(seg);
+    if (!m) continue;
+    // Stop at the first token that is not a plain flag/remote/refspec: past it
+    // we are reading quoted text or code, not git arguments.
+    const tokens = m[1].trim().split(/\s+/).filter(Boolean);
+    const end = tokens.findIndex((t) => !/^[A-Za-z0-9._\/:+=-]+$/.test(t));
+    const args = (end < 0 ? tokens : tokens.slice(0, end)).filter((a) => !a.startsWith("-"));
+    for (const refspec of args.slice(1)) {
+      const dst = refspec.includes(":") ? refspec.slice(refspec.indexOf(":") + 1) : refspec;
+      const branch = dst.replace(/^\+/, "").replace(/^refs\/heads\//, "");
+      if (branch !== "HEAD" && BRANCH_RE.test(branch)) out.push(branch);
+    }
+  }
+  return out;
+}
+
+/** The PR a create-PR tool result is about: its `url`/`html_url`, else the only/first PR URL. */
+function createdPr(resultText) {
+  const own = /"(?:html_)?url\\?"\s*:\s*\\?"(https:\/\/github\.com\/[^"\\]+\/pull\/\d+)/.exec(resultText);
+  const refs = extractPrRefs(own ? own[1] : resultText);
+  return refs.length ? [{ ...refs[0], kind: "created" }] : [];
 }
 
 function promptText(entry) {
@@ -114,6 +163,7 @@ function promptText(entry) {
 async function parseSessionFile(file, start = 0) {
   const id = path.basename(file, ".jsonl");
   const result = {
+    // `branches`: branches the session did work on (edited files, committed or pushed), not merely had checked out.
     session: { id, cwd: null, title: null, firstPrompt: null, branches: [], repos: [], updatedAt: null, source: "local" },
     prs: [],
     end: start,
@@ -153,7 +203,6 @@ async function parseSessionFile(file, start = 0) {
     if (!entry || typeof entry !== "object") continue;
 
     if (entry.cwd) result.session.cwd = entry.cwd;
-    if (entry.gitBranch && entry.gitBranch !== "HEAD") branches.add(entry.gitBranch);
     if (entry.timestamp && (!result.session.updatedAt || entry.timestamp > result.session.updatedAt)) {
       result.session.updatedAt = entry.timestamp;
     }
@@ -164,7 +213,7 @@ async function parseSessionFile(file, start = 0) {
     if (start === 0 && !result.session.firstPrompt) result.session.firstPrompt = promptText(entry);
 
     if (SKIPPED_TYPES.has(entry.type)) continue;
-    if (!(line.includes("github.com") && line.includes("/pull/")) && !line.includes('"tool_use"')) continue;
+    if (!line.includes("/pull/") && !line.includes('"tool_use"')) continue;
     const content = entry.message && entry.message.content;
     if (typeof content === "string") addRefs(mentions(content));
     for (const block of contentBlocks(entry)) {
@@ -172,11 +221,15 @@ async function parseSessionFile(file, start = 0) {
         addRefs(classifyEventPrRefs(block.text || ""));
       } else if (block.type === "tool_use" && block.id) {
         toolNames.set(block.id, block.name || "");
+        const command = (block.input && block.input.command) || "";
+        const onBranch = entry.gitBranch && entry.gitBranch !== "HEAD" ? entry.gitBranch : null;
+        if (onBranch && (WRITE_TOOLS.has(block.name) || isGitWork(command))) branches.add(onBranch);
+        for (const b of pushedBranches(command)) branches.add(b);
         if (isCreatePrCall(block)) createCalls.add(block.id);
         if (!FILE_TOOLS.has(block.name)) addRefs(mentions(JSON.stringify(block.input || "")));
       } else if (block.type === "tool_result") {
         const text = JSON.stringify(block.content || "");
-        if (createCalls.has(block.tool_use_id)) addRefs(extractPrRefs(text).map((r) => ({ ...r, kind: "created" })));
+        if (createCalls.has(block.tool_use_id)) addRefs(createdPr(text));
         else if (!FILE_TOOLS.has(toolNames.get(block.tool_use_id))) addRefs(mentions(text));
       }
     }
@@ -226,4 +279,4 @@ async function scanProjects(root, known = {}, onSession = () => {}) {
   return { files: files.length, changed };
 }
 
-module.exports = { claudeConfigDir, projectsDir, listSessionFiles, parseSessionFile, scanProjects, repoForCwd };
+module.exports = { claudeConfigDir, projectsDir, listSessionFiles, parseSessionFile, scanProjects, repoForCwd, pushedBranches, createdPr };

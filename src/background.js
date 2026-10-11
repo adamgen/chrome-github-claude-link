@@ -6,17 +6,19 @@
  */
 importScripts("shared/core.js");
 
-const { emptyDb, upsertSession, addRelation, findSessionsForPr, listRelations, prKey } = self.CGL;
+const { emptyDb, upsertSession, addRelation, findSessionsForPr, listRelations, prKey, DB_VERSION } = self.CGL;
 
 const HOST_NAME = "com.claude_link.host";
 const DB_KEY = "db";
 const SCAN_KEY = "scan";
 const SETTINGS_KEY = "settings";
 const ALARM = "cgl-poll";
+const SETTINGS_VERSION = 2;
 const DEFAULT_SETTINGS = {
   pollSeconds: 30,
   matchBranch: true,
-  showMentioned: true,
+  // A PR URL appearing in a session says little about whether it worked on the PR.
+  showMentioned: false,
 };
 // Write to storage in chunks so a first scan of many sessions does not hold
 // everything in memory or trigger one huge storage event.
@@ -29,17 +31,32 @@ function serialized(fn) {
   return run;
 }
 
+// Relations stored under older matching rules are dropped, together with the
+// scan state, so every transcript is re-read with the current rules.
+const migrated = (async () => {
+  const { [DB_KEY]: db, [SETTINGS_KEY]: settings } = await chrome.storage.local.get([DB_KEY, SETTINGS_KEY]);
+  if (db && db.version !== DB_VERSION) await chrome.storage.local.remove([DB_KEY, SCAN_KEY]);
+  if (settings && settings.version !== SETTINGS_VERSION) {
+    // showMentioned used to default to on; reset it to the new default.
+    const { showMentioned: _old, ...rest } = settings;
+    await chrome.storage.local.set({ [SETTINGS_KEY]: { ...rest, version: SETTINGS_VERSION } });
+  }
+})().catch(() => {});
+
 async function loadDb() {
+  await migrated;
   const { [DB_KEY]: db } = await chrome.storage.local.get(DB_KEY);
-  return db && db.version === 1 ? db : emptyDb();
+  return db && db.version === DB_VERSION ? db : emptyDb();
 }
 
 async function loadScan() {
+  await migrated;
   const { [SCAN_KEY]: scan } = await chrome.storage.local.get(SCAN_KEY);
   return { known: {}, lastScanAt: 0, lastResult: null, ...(scan || {}) };
 }
 
 async function loadSettings() {
+  await migrated;
   const { [SETTINGS_KEY]: s } = await chrome.storage.local.get(SETTINGS_KEY);
   return { ...DEFAULT_SETTINGS, ...(s || {}) };
 }
@@ -218,7 +235,7 @@ const handlers = {
   async "cgl:overview"() {
     const [db, scan, settings] = await Promise.all([loadDb(), loadScan(), loadSettings()]);
     return {
-      relations: listRelations(db),
+      relations: listRelations(db).filter((r) => settings.showMentioned || r.kind !== "mentioned"),
       sessionCount: Object.keys(db.sessions).length,
       prCount: Object.keys(db.prs).length,
       lastScanAt: scan.lastScanAt,
@@ -228,7 +245,7 @@ const handlers = {
     };
   },
   async "cgl:settings"(msg) {
-    const settings = { ...(await loadSettings()), ...(msg.settings || {}) };
+    const settings = { ...(await loadSettings()), ...(msg.settings || {}), version: SETTINGS_VERSION };
     await chrome.storage.local.set({ [SETTINGS_KEY]: settings });
     await schedulePolling();
     return { settings };

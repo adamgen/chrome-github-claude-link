@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Claude Code ↔ GitHub PR Link",
   "short_name": "Claude PR Link",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Links GitHub pull requests to the local Claude Code sessions that made them, with a deep link that opens the session in the Claude app.",
   "minimum_chrome_version": "120",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAznCwKR64dIvOmItcx71OiEGp4D1NiY6P0ivmDdYtCs/dphfuXXPdPume6mCUrL1Wqt4/ZSDJ5JEVgY7TIGUVVCB8JgSOEWJqstB2EQBIWRXQTODrtrkm0I9Te0g7HRYGMTyVQwuj1NWqLph1f6+2sEWJvDLn69gCBBimyANmfMkEZrAjAwAi/quBfdOBhdSZbj4j4+4YHTdjNmFylxDuif7U1oktwfjE2H5wyZiRtlxzAOJcs1CJJsqNU/Tc54vA46MUTNGHsL5LQhQp5UWjWE1XDaQijvzyuWky7cxEr/5jZKAF5f9xcVMm3P98iePBIS2bi+9hmHPg0XqsiuUx1wIDAQAB",

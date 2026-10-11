@@ -139,8 +139,11 @@
     return (KIND_RANK[a] ?? 99) <= (KIND_RANK[b] ?? 99) ? a : b;
   }
 
+  // Bump when the meaning of stored relations changes; old data is dropped and rebuilt.
+  const DB_VERSION = 2;
+
   function emptyDb() {
-    return { version: 1, sessions: {}, prs: {} };
+    return { version: DB_VERSION, sessions: {}, prs: {} };
   }
 
   /** Merge session metadata into the db (mutates and returns `db`). */
@@ -182,7 +185,8 @@
 
   /**
    * Sessions related to a PR, strongest first. When `headBranch` is known,
-   * sessions that pushed to that branch of the same repo also match.
+   * sessions that worked on that branch (edited, committed or pushed) in the
+   * same repo also match.
    */
   function findSessionsForPr(db, { owner, repo, number, headBranch } = {}, { matchBranch = true } = {}) {
     const key = prKey(owner, repo, number);
@@ -249,6 +253,7 @@
   return {
     CLAUDE_ORIGIN,
     KIND_RANK,
+    DB_VERSION,
     prKey,
     parsePrKey,
     prUrl,

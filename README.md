@@ -32,22 +32,31 @@ the transcripts. Chrome starts it for each check, and it exits when the check is
 reports:
 
 - the session's working directory, and the GitHub repo of that directory's `origin` remote;
-- every git branch the session was on;
+- the git branches the session worked on: it edited files, committed or pushed while on them, or pushed to them
+  (having a branch checked out is not enough);
 - its title (the summary or custom title, otherwise the first prompt);
 - the GitHub PRs the session opened or mentioned.
 
 Transcripts are append-only. After the first scan, each check reads only the bytes added since the last one.
 
-When a PR has several related sessions, the strongest link comes first:
+A session is linked to a PR for one of these reasons. When several sessions are linked, the strongest reason comes
+first:
 
-| Kind        | Meaning                                                                                       |
-| ----------- | --------------------------------------------------------------------------------------------- |
-| `branch`    | The session worked on the PR's head branch in the same repo.                                  |
-| `created`   | The session opened the PR (`gh pr create` / GitHub `create_pull_request` result, or said so).  |
-| `backlink`  | The PR description links to a `https://claude.ai/code/session_…` cloud session.               |
-| `mentioned` | The PR URL appears in the session (can be turned off in settings).                            |
+| Kind        | Meaning                                                                                                   |
+| ----------- | --------------------------------------------------------------------------------------------------------- |
+| `branch`    | The session edited files, committed or pushed on the PR's head branch, in the same repo.                  |
+| `created`   | The session opened the PR: a `gh pr create` / GitHub `create_pull_request` call returned this PR's URL.   |
+| `backlink`  | The PR description links to a `https://claude.ai/code/session_…` cloud session.                          |
+| `mentioned` | The PR's URL only appears in the session. **Off by default**; turn it on in the popup's settings.         |
 
-PR URLs inside file contents the session read or wrote (Read/Write/Edit/Grep…) are ignored.
+These never create a link:
+
+- a chat that only had the PR's branch checked out (questions, reviews, unrelated work);
+- PR URLs in files the session read or wrote (Read/Write/Edit/Grep…);
+- listings: a single tool result or message containing more than 3 PR URLs (e.g. `gh pr list`);
+- text that only *contains* `git push …` (scripts, string literals). Only real command lines count.
+
+On a PR page, hover the chip, or open the `+N` menu, to see why each session is linked.
 
 Cloud sessions (claude.ai/code) aren't on your disk. If a PR description links to one, the chip opens it on
 claude.ai instead (**Claude Code (web)**).

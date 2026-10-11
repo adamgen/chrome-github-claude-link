@@ -26,6 +26,7 @@ const ROOT = path.resolve(__dirname, "..");
 const SESSION_A = "aaaaaaaa-0000-4000-8000-000000000001"; // opened PR #11 with gh pr create
 const SESSION_B = "bbbbbbbb-0000-4000-8000-000000000002"; // worked on claude/branch-b
 const SESSION_C = "session_01E2eBacklink000000003"; // cloud session, only linked from PR #12 body
+const SESSION_NOISE = "cccccccc-0000-4000-8000-000000000004"; // unrelated chat that sat on claude/branch-b
 
 const jsonl = (sessionId, cwd, entries) =>
   entries.map((e) => JSON.stringify({ sessionId, cwd, timestamp: "2026-10-01T10:00:00Z", ...e })).join("\n") + "\n";
@@ -93,7 +94,24 @@ async function main() {
   const fileB = path.join(proj, `${SESSION_B}.jsonl`);
   fs.writeFileSync(
     fileB,
-    jsonl(SESSION_B, cwd, [{ type: "user", gitBranch: "claude/branch-b", message: { role: "user", content: "Fix the flaky login test" } }]),
+    jsonl(SESSION_B, cwd, [
+      { type: "user", gitBranch: "claude/branch-b", message: { role: "user", content: "Fix the flaky login test" } },
+      { type: "assistant", gitBranch: "claude/branch-b", message: { content: [{ type: "tool_use", id: "e1", name: "Edit", input: { file_path: "login.test.js" } }] } },
+    ]),
+  );
+  // Noise that must NOT be linked: a chat that only had claude/branch-b checked
+  // out, and listed every open PR.
+  fs.writeFileSync(
+    path.join(proj, `${SESSION_NOISE}.jsonl`),
+    jsonl(SESSION_NOISE, cwd, [
+      { type: "user", gitBranch: "claude/branch-b", message: { role: "user", content: "What does the auth module do?" } },
+      { type: "assistant", gitBranch: "claude/branch-b", message: { content: [{ type: "tool_use", id: "l1", name: "Bash", input: { command: "gh pr list" } }] } },
+      {
+        type: "user",
+        gitBranch: "claude/branch-b",
+        message: { content: [{ type: "tool_result", tool_use_id: "l1", content: [11, 12, 13, 14].map((n) => `https://github.com/acme/web/pull/${n}`).join("\n") }] },
+      },
+    ]),
   );
 
   // Register the native host inside the test profile only.
@@ -108,12 +126,14 @@ async function main() {
   const executablePath = fs.existsSync("/opt/pw-browsers/chromium-1194/chrome-linux/chrome")
     ? "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
     : undefined;
-  const context = await chromium.launchPersistentContext(userDataDir, {
-    headless: false,
-    executablePath,
-    args: ["--headless=new", `--disable-extensions-except=${ROOT}`, `--load-extension=${ROOT}`, "--no-sandbox"],
-    viewport: { width: 1100, height: 420 },
-  });
+  const launch = () =>
+    chromium.launchPersistentContext(userDataDir, {
+      headless: false,
+      executablePath,
+      args: ["--headless=new", `--disable-extensions-except=${ROOT}`, `--load-extension=${ROOT}`, "--no-sandbox"],
+      viewport: { width: 1100, height: 420 },
+    });
+  let context = await launch();
   await context.route("https://github.com/**", async (route) => {
     const body = githubPages[new URL(route.request().url()).pathname];
     return body ? route.fulfill({ contentType: "text/html", body }) : route.fulfill({ status: 404, body: "not found" });
@@ -134,6 +154,8 @@ async function main() {
     throw e;
   });
   assert.equal(db.prs["acme/web#11"].sessions[SESSION_A].kind, "created");
+  assert.ok(!Object.values(db.prs).some((p) => p.sessions[SESSION_NOISE]), "PR listing is not linked");
+  assert.deepEqual(db.sessions[SESSION_NOISE].branches, []);
   assert.equal(db.sessions[SESSION_A].cwd, cwd);
   assert.deepEqual(db.sessions[SESSION_A].repos, ["acme/web"]);
   assert.deepEqual(db.sessions[SESSION_B].branches, ["claude/branch-b"]);
@@ -155,7 +177,8 @@ async function main() {
   await gh.goto("https://github.com/acme/web/pull/13");
   await gh.locator(".cgl-chip").waitFor({ timeout: 10000 });
   assert.match(await gh.locator(".cgl-chip").getAttribute("href"), new RegExp(`^claude://resume\\?session=${SESSION_B}`));
-  console.log("✓ PR matched by head branch");
+  assert.equal(await gh.locator(".cgl-more").count(), 0, "the chat that only had the branch checked out is not linked");
+  console.log("✓ PR matched by head branch, unrelated chat on the same branch ignored");
 
   // 4. Cloud-session backlink falls back to claude.ai.
   await gh.goto("https://github.com/acme/web/pull/12");
@@ -221,6 +244,28 @@ async function main() {
   assert.equal(await popup.locator("#setup").isHidden(), true);
   if (shotsDir) await popup.screenshot({ path: path.join(shotsDir, "popup.png") });
   console.log("✓ popup lists relations");
+
+  // 8. Upgrading from 0.2.0 (then restarting Chrome): links stored under the
+  //    old rules are dropped and rebuilt, and "mentioned" goes back to off.
+  await worker.evaluate(async () => {
+    const { db } = await chrome.storage.local.get("db");
+    db.version = 1;
+    db.prs["acme/web#500"] = { owner: "acme", repo: "web", number: 500, sessions: { stale: { kind: "branch", sources: ["local"] } } };
+    await chrome.storage.local.set({ db, settings: { pollSeconds: 30, matchBranch: true, showMentioned: true } });
+  });
+  await context.close();
+  context = await launch();
+  [worker] = context.serviceWorkers();
+  if (!worker) worker = await context.waitForEvent("serviceworker");
+  const readStorage = (key) => worker.evaluate(async (k) => (await chrome.storage.local.get(k))[k], key);
+  db = await waitFor(async () => {
+    const d = await readStorage("db");
+    return d && d.version === 2 && d.prs["acme/web#11"] && d;
+  }, "rebuilt db after upgrade");
+  assert.equal(db.prs["acme/web#500"], undefined, "stale relation dropped");
+  const settings = await readStorage("settings");
+  assert.equal(settings.showMentioned, undefined, "old showMentioned=true reset to the new default (off)");
+  console.log("✓ upgrade drops old links and rebuilds them with the new rules");
 
   await context.close();
   fs.rmSync(tmp, { recursive: true, force: true });

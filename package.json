@@ -1,6 +1,6 @@
 {
   "name": "chrome-github-claude-link",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Chrome extension linking GitHub pull requests to the local Claude Code sessions that produced them.",
   "scripts": {
