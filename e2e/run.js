@@ -164,22 +164,40 @@ async function main() {
   assert.equal(await gh.locator(".cgl-chip").getAttribute("target"), "_blank");
   console.log("✓ cloud session backlink links to claude.ai");
 
-  // 5. Polling picks up new lines appended to a running session.
+  // 5. No clicks, no reloads: an already-open PR page updates on its own once
+  //    the 30 s alarm picks up a line appended to a running session.
+  await gh.goto("https://github.com/acme/web/pull/14");
+  await gh.waitForTimeout(1500);
+  assert.equal(await gh.locator(".cgl-chip").count(), 0, "PR #14 has no session yet");
+  const appendedAt = Date.now();
   fs.appendFileSync(
     fileB,
     jsonl(SESSION_B, cwd, [
       { type: "assistant", gitBranch: "claude/branch-b", message: { content: [{ type: "text", text: "Opened a PR: https://github.com/acme/web/pull/14" }] } },
     ]),
   );
-  await worker.evaluate(() => poll()); // what the 30 s alarm does
-  db = await waitFor(async () => {
-    const d = await getDb();
-    return d.prs["acme/web#14"] && d;
-  }, "incremental scan");
+  await gh.locator(".cgl-chip").waitFor({ timeout: 75000 });
+  db = await getDb();
   assert.equal(db.prs["acme/web#14"].sessions[SESSION_B].kind, "created");
-  await gh.goto("https://github.com/acme/web/pull/14");
-  await gh.locator(".cgl-chip").waitFor({ timeout: 10000 });
-  console.log("✓ polling picked up an appended transcript line");
+  console.log(`✓ open PR page updated by itself ${Math.round((Date.now() - appendedAt) / 1000)}s after the transcript changed`);
+
+  // 5b. If Chrome drops the alarm, opening a GitHub page restores it and rescans.
+  await worker.evaluate(async () => {
+    await chrome.alarms.clearAll();
+    const { scan } = await chrome.storage.local.get("scan");
+    scan.lastResult.at = 0; // pretend the last check was long ago
+    await chrome.storage.local.set({ scan });
+  });
+  fs.appendFileSync(
+    fileB,
+    jsonl(SESSION_B, cwd, [
+      { type: "assistant", gitBranch: "claude/branch-b", message: { content: [{ type: "text", text: "Opened a PR: https://github.com/acme/web/pull/15" }] } },
+    ]),
+  );
+  await gh.goto("https://github.com/acme/web/pull/13");
+  await waitFor(async () => (await getDb()).prs["acme/web#15"], "rescan triggered by a GitHub page");
+  await waitFor(() => worker.evaluate(async () => !!(await chrome.alarms.get("cgl-poll"))), "alarm recreated");
+  console.log("✓ lost alarm recovered; GitHub page triggered a fresh scan");
 
   // 6. PR list annotations.
   await gh.goto("https://github.com/acme/web/pulls");

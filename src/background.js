@@ -74,6 +74,7 @@ let polling = null;
 function poll() {
   if (polling) return polling;
   polling = (async () => {
+    ensureAlarm().catch(() => {});
     const { known } = await loadScan();
     const started = Date.now();
     let pending = { sessions: [], relations: [], known: {} };
@@ -156,6 +157,20 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM) poll();
 });
 
+// Chrome can drop alarms (e.g. extension disabled and re-enabled, some
+// browser restarts), so recreate it whenever the worker wakes up and on every check.
+async function ensureAlarm() {
+  if (!(await chrome.alarms.get(ALARM))) await schedulePolling();
+}
+ensureAlarm();
+
+/** Poll unless a check (successful or not) ran within the polling interval. */
+async function pollIfStale() {
+  const [{ lastResult }, { pollSeconds }] = await Promise.all([loadScan(), loadSettings()]);
+  const lastAttempt = (lastResult && lastResult.at) || 0;
+  if (Date.now() - lastAttempt > pollSeconds * 1000) poll();
+}
+
 // ---- lookups ------------------------------------------------------------
 
 async function lookup(prs, tabId) {
@@ -193,6 +208,8 @@ const handlers = {
     return {};
   },
   async "cgl:lookup"(msg, sender) {
+    // A GitHub page is open: make sure its data is fresh even if the alarm was lost.
+    pollIfStale().catch(() => {});
     return lookup(msg.prs, sender.tab && sender.tab.id);
   },
   async "cgl:poll"() {
