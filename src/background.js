@@ -13,13 +13,8 @@ const DB_KEY = "db";
 const SCAN_KEY = "scan";
 const SETTINGS_KEY = "settings";
 const ALARM = "cgl-poll";
-const SETTINGS_VERSION = 2;
-const DEFAULT_SETTINGS = {
-  pollSeconds: 30,
-  matchBranch: true,
-  // A PR URL appearing in a session says little about whether it worked on the PR.
-  showMentioned: false,
-};
+const SETTINGS_VERSION = 3;
+const DEFAULT_SETTINGS = { pollSeconds: 30 };
 // Write to storage in chunks so a first scan of many sessions does not hold
 // everything in memory or trigger one huge storage event.
 const BATCH = 200;
@@ -37,8 +32,8 @@ const migrated = (async () => {
   const { [DB_KEY]: db, [SETTINGS_KEY]: settings } = await chrome.storage.local.get([DB_KEY, SETTINGS_KEY]);
   if (db && db.version !== DB_VERSION) await chrome.storage.local.remove([DB_KEY, SCAN_KEY]);
   if (settings && settings.version !== SETTINGS_VERSION) {
-    // showMentioned used to default to on; reset it to the new default.
-    const { showMentioned: _old, ...rest } = settings;
+    // Branch and mention matching are gone; drop their switches.
+    const { showMentioned: _mentioned, matchBranch: _branch, ...rest } = settings;
     await chrome.storage.local.set({ [SETTINGS_KEY]: { ...rest, version: SETTINGS_VERSION } });
   }
 })().catch(() => {});
@@ -68,7 +63,7 @@ function record({ sessions = [], relations = [], known, scanResult }) {
     if (sessions.length || relations.length) {
       const db = await loadDb();
       for (const s of sessions) upsertSession(db, s, now);
-      for (const r of relations) addRelation(db, r.sessionId, r.ref, r.ref.kind || "mentioned", r.source, now);
+      for (const r of relations) addRelation(db, r.sessionId, r.ref, r.ref.kind || "linked", r.source, now);
       writes[DB_KEY] = db;
     }
     if (known || scanResult) {
@@ -124,8 +119,10 @@ function poll() {
       };
       port.onMessage.addListener((msg) => {
         if (msg.type === "session") {
-          pending.sessions.push(msg.session);
-          for (const ref of msg.prs || []) pending.relations.push({ sessionId: msg.session.id, ref, source: "local" });
+          if (msg.session) {
+            pending.sessions.push(msg.session);
+            for (const ref of msg.prs || []) pending.relations.push({ sessionId: msg.session.id, ref, source: "local" });
+          }
           pending.known[msg.file] = msg.stat;
           if (pending.sessions.length >= BATCH) flush();
         } else if (msg.type === "done") {
@@ -191,25 +188,14 @@ async function pollIfStale() {
 // ---- lookups ------------------------------------------------------------
 
 async function lookup(prs, tabId) {
-  const [db, settings] = await Promise.all([loadDb(), loadSettings()]);
+  const db = await loadDb();
   const results = {};
-  const newBranchMatches = [];
   let total = 0;
   for (const pr of prs || []) {
-    let found = findSessionsForPr(db, pr, { matchBranch: settings.matchBranch });
-    const key = prKey(pr.owner, pr.repo, pr.number);
-    for (const f of found) {
-      const stored = db.prs[key] && db.prs[key].sessions[f.id];
-      if (f.kind === "branch" && (!stored || stored.kind !== "branch")) {
-        newBranchMatches.push({ sessionId: f.id, ref: { ...pr, kind: "branch" }, source: "github-branch" });
-      }
-    }
-    if (!settings.showMentioned) found = found.filter((f) => f.kind !== "mentioned");
-    results[key] = found;
+    const found = findSessionsForPr(db, pr);
+    results[prKey(pr.owner, pr.repo, pr.number)] = found;
     total += found.length;
   }
-  // Persist branch matches so they show up in the popup.
-  if (newBranchMatches.length) record({ relations: newBranchMatches }).catch(() => {});
   if (tabId != null && prs && prs.length === 1) {
     chrome.action.setBadgeText({ tabId, text: total ? String(total) : "" }).catch(() => {});
     chrome.action.setBadgeBackgroundColor({ tabId, color: "#D97757" }).catch(() => {});
@@ -235,7 +221,7 @@ const handlers = {
   async "cgl:overview"() {
     const [db, scan, settings] = await Promise.all([loadDb(), loadScan(), loadSettings()]);
     return {
-      relations: listRelations(db).filter((r) => settings.showMentioned || r.kind !== "mentioned"),
+      relations: listRelations(db),
       sessionCount: Object.keys(db.sessions).length,
       prCount: Object.keys(db.prs).length,
       lastScanAt: scan.lastScanAt,

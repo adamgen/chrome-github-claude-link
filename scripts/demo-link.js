@@ -23,10 +23,10 @@ async function main() {
     console.error(wanted ? `No local session ${wanted} in ${projectsDir()}` : `No sessions in ${projectsDir()}`);
     process.exit(1);
   }
-  const { session } = await parseSessionFile(file);
+  const { session, prs } = await parseSessionFile(file);
   console.log(`Session: ${sessionTitle(session) || "(untitled)"}`);
   console.log(`Folder:  ${session.cwd}`);
-  console.log(`Branch:  ${session.branches.join(", ") || "-"}`);
+  console.log(`PRs:     ${prs.map((p) => `${p.owner}/${p.repo}#${p.number}`).join(", ") || "-"}`);
   console.log(`\n${desktopResumeUrl(session.id, session.cwd)}\n`);
   console.log("Paste the link into the Chrome address bar and press Enter.");
 }

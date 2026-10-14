@@ -70,16 +70,17 @@ const WINDOWS_REG_KEYS = [
 function writeLauncher() {
   fs.mkdirSync(BIN_DIR, { recursive: true });
   const script = path.join(__dirname, "claude-link-host.js");
-  const configDir = process.env.CLAUDE_CONFIG_DIR;
+  // Custom data locations the host must use too.
+  const vars = ["CLAUDE_CONFIG_DIR", "CLAUDE_APP_SESSIONS_DIR"].filter((v) => process.env[v]);
   if (process.platform === "win32") {
     const file = path.join(BIN_DIR, "claude-link-host.bat");
-    const env = configDir ? `set "CLAUDE_CONFIG_DIR=${configDir}"\r\n` : "";
+    const env = vars.map((v) => `set "${v}=${process.env[v]}"\r\n`).join("");
     fs.writeFileSync(file, `@echo off\r\n${env}"${process.execPath}" "${script}" %*\r\n`);
     return file;
   }
   const file = path.join(BIN_DIR, "claude-link-host");
   const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
-  const env = configDir ? `export CLAUDE_CONFIG_DIR=${q(configDir)}\n` : "";
+  const env = vars.map((v) => `export ${v}=${q(process.env[v])}\n`).join("");
   fs.writeFileSync(file, `#!/bin/sh\n${env}exec ${q(process.execPath)} ${q(script)} "$@"\n`);
   fs.chmodSync(file, 0o755);
   return file;

@@ -17,14 +17,10 @@
   // Relation kinds, strongest first. The lower the rank, the more confident we
   // are that the session is *the* session behind the PR.
   const KIND_RANK = {
-    branch: 0, // session pushed to the PR's head branch
-    created: 1, // session output contains the PR creation
-    backlink: 2, // PR body / commits link back to the session
-    mentioned: 3, // PR URL appears somewhere in the session
+    linked: 0, // Claude Code or the Claude app recorded the PR for the session
+    backlink: 1, // PR body / commits link back to the session
   };
 
-  const PR_URL_RE =
-    /https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))\/([A-Za-z0-9._-]{1,100})\/pull\/(\d{1,9})(?![\d])/g;
   const SESSION_URL_RE =
     /https?:\/\/claude\.ai\/code\/(session_[A-Za-z0-9]{8,64})\b/g;
 
@@ -55,18 +51,6 @@
     if (!m) return null;
     if (!allowSubpath && m[4] && m[4] !== "/") return null;
     return { owner: m[1], repo: m[2], number: Number(m[3]) };
-  }
-
-  /** Every distinct PR referenced by a URL inside `text`. */
-  function extractPrRefs(text) {
-    const out = new Map();
-    if (!text) return [];
-    for (const m of String(text).matchAll(PR_URL_RE)) {
-      const repo = m[2].replace(/\.git$/, "");
-      const key = prKey(m[1], repo, m[3]);
-      if (!out.has(key)) out.set(key, { owner: m[1], repo, number: Number(m[3]), key });
-    }
-    return [...out.values()];
   }
 
   /** Every distinct Claude Code session id linked (as a claude.ai/code URL) in `text`. */
@@ -102,35 +86,10 @@
     return { url: sessionUrl(s.id), app: false };
   }
 
-  /** Title to show for a session. */
+  /** Title to show for a session: the Claude app's, else the transcript's, else the first prompt. */
   function sessionTitle(session) {
     const s = session || {};
-    return s.title || s.firstPrompt || null;
-  }
-
-  /** `https://github.com/o/r(.git)` or `o/r` → `o/r` (lowercased), else null. */
-  function normalizeRepo(value) {
-    if (!value) return null;
-    const s = String(value).trim();
-    const m =
-      /github\.com[/:]([^/\s]+)\/([^/\s#?]+?)(?:\.git)?(?:[/#?].*)?$/i.exec(s) ||
-      /^([A-Za-z0-9][A-Za-z0-9-]*)\/([A-Za-z0-9._-]+?)(?:\.git)?$/.exec(s);
-    return m ? `${m[1]}/${m[2]}`.toLowerCase() : null;
-  }
-
-  /**
-   * Decide how a PR relates to a session from one event's JSON: a URL that
-   * appears next to a PR-creation tool call is "created", anything else is
-   * "mentioned".
-   */
-  function classifyEventPrRefs(eventJson) {
-    const refs = extractPrRefs(eventJson);
-    if (!refs.length) return [];
-    const created =
-      /create_pull_request|gh pr create|pull request (?:created|opened)|(?:created|opened) (?:a |the )?(?:draft )?(?:pull request|PR)\b/i.test(
-        eventJson,
-      );
-    return refs.map((r) => ({ ...r, kind: created ? "created" : "mentioned" }));
+    return s.appTitle || s.title || s.firstPrompt || null;
   }
 
   function strongerKind(a, b) {
@@ -140,7 +99,7 @@
   }
 
   // Bump when the meaning of stored relations changes; old data is dropped and rebuilt.
-  const DB_VERSION = 2;
+  const DB_VERSION = 3;
 
   function emptyDb() {
     return { version: DB_VERSION, sessions: {}, prs: {} };
@@ -183,34 +142,11 @@
     return db;
   }
 
-  /**
-   * Sessions related to a PR, strongest first. When `headBranch` is known,
-   * sessions that worked on that branch (edited, committed or pushed) in the
-   * same repo also match.
-   */
-  function findSessionsForPr(db, { owner, repo, number, headBranch } = {}, { matchBranch = true } = {}) {
-    const key = prKey(owner, repo, number);
-    const repoKey = `${String(owner).toLowerCase()}/${String(repo).toLowerCase()}`;
-    const found = new Map();
-    const pr = db.prs[key];
-    if (pr) {
-      for (const [id, rel] of Object.entries(pr.sessions)) {
-        found.set(id, { id, kind: rel.kind, sources: rel.sources || [] });
-      }
-    }
-    if (matchBranch && headBranch) {
-      for (const s of Object.values(db.sessions)) {
-        if (!(s.branches || []).includes(headBranch)) continue;
-        if (!(s.repos || []).some((r) => r === repoKey)) continue;
-        const prev = found.get(s.id);
-        found.set(s.id, {
-          id: s.id,
-          kind: strongerKind(prev && prev.kind, "branch"),
-          sources: [...new Set([...((prev && prev.sources) || []), "branch"])],
-        });
-      }
-    }
-    return [...found.values()]
+  /** Sessions related to a PR, strongest first. */
+  function findSessionsForPr(db, { owner, repo, number } = {}) {
+    const pr = db.prs[prKey(owner, repo, number)];
+    const found = Object.entries((pr && pr.sessions) || {}).map(([id, rel]) => ({ id, kind: rel.kind, sources: rel.sources || [] }));
+    return found
       .map((r) => {
         const s = db.sessions[r.id] || { id: r.id };
         const link = sessionLink(s);
@@ -258,14 +194,11 @@
     parsePrKey,
     prUrl,
     parsePrUrl,
-    extractPrRefs,
     extractSessionLinks,
     sessionUrl,
     desktopResumeUrl,
     sessionLink,
     sessionTitle,
-    normalizeRepo,
-    classifyEventPrRefs,
     strongerKind,
     emptyDb,
     upsertSession,

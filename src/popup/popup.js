@@ -1,8 +1,8 @@
 (() => {
   "use strict";
   const $ = (id) => document.getElementById(id);
-  const KIND_LABEL = { branch: "branch", created: "opened", backlink: "backlink", mentioned: "mentioned" };
-  const SETTING_IDS = ["pollSeconds", "matchBranch", "showMentioned"];
+  const KIND_LABEL = { linked: "linked", backlink: "backlink" };
+  const SETTING_IDS = ["pollSeconds"];
 
   let relations = [];
 

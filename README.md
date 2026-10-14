@@ -13,12 +13,17 @@ deep link on the PR. The link opens the session in the Claude app.
 
 ## How it works
 
+The extension doesn't guess which session made a PR. It uses the links that Claude Code and the Claude app already
+record:
+
 ```
-~/.claude/projects/<project>/<session>.jsonl      Claude Code transcripts (local)
-        │  read incrementally (only new bytes)
+~/.claude/projects/<project>/<session>.jsonl          Claude Code transcripts: {"type":"pr-link", prUrl, …} lines
+~/Library/Application Support/Claude/                 Claude app: one JSON file per session with prs[] and
+  claude-code-sessions/<…>/local_<id>.json              cliSessionId (the transcript's session id)
+        │  read incrementally (only new bytes / changed files)
         ▼
 host/claude-link-host.js     native messaging host, started by Chrome on demand
-        │  stdio, one message per changed session
+        │  stdio, one message per changed file
         ▼
 src/background.js            polls every 30 s (chrome.alarms), stores relations
         │  chrome.storage.local
@@ -28,33 +33,26 @@ src/content/github.js        adds the deep links on github.com
 
 Chrome extensions cannot read files on disk. A small Node program, registered with Chrome as a
 [native messaging host](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging), reads
-the transcripts. Chrome starts it for each check, and it exits when the check is done. For each transcript it
-reports:
+these files. Chrome starts it for each check, and it exits when the check is done. It reports:
 
-- the session's working directory, and the GitHub repo of that directory's `origin` remote;
-- the git branches the session worked on: it edited files, committed or pushed while on them, or pushed to them
-  (having a branch checked out is not enough);
-- its title (the summary or custom title, otherwise the first prompt);
-- the GitHub PRs the session opened or mentioned.
+- from each transcript: the session's working directory, its title (custom title or summary, otherwise the first
+  prompt), and the PRs Claude Code recorded for the session as `pr-link` entries;
+- from each Claude app session file: the title shown in the app and the PRs in `prs[]`, linked to the session
+  named by `cliSessionId`. Sessions you only ran in the terminal don't have one.
 
-Transcripts are append-only. After the first scan, each check reads only the bytes added since the last one.
+Transcripts are append-only. After the first scan, each check reads only the bytes added since the last one. App
+session files are small; a changed one is read again in full.
 
 A session is linked to a PR for one of these reasons. When several sessions are linked, the strongest reason comes
 first:
 
-| Kind        | Meaning                                                                                                   |
-| ----------- | --------------------------------------------------------------------------------------------------------- |
-| `branch`    | The session edited files, committed or pushed on the PR's head branch, in the same repo.                  |
-| `created`   | The session opened the PR: a `gh pr create` / GitHub `create_pull_request` call returned this PR's URL.   |
-| `backlink`  | The PR description links to a `https://claude.ai/code/session_…` cloud session.                          |
-| `mentioned` | The PR's URL only appears in the session. **Off by default**; turn it on in the popup's settings.         |
+| Kind       | Meaning                                                                                          |
+| ---------- | ------------------------------------------------------------------------------------------------ |
+| `linked`   | Claude Code (`pr-link` entry) or the Claude app (`prs[]`) recorded the PR for the session.       |
+| `backlink` | The PR description links to a `https://claude.ai/code/session_…` cloud session.                 |
 
-These never create a link:
-
-- a chat that only had the PR's branch checked out (questions, reviews, unrelated work);
-- PR URLs in files the session read or wrote (Read/Write/Edit/Grep…);
-- listings: a single tool result or message containing more than 3 PR URLs (e.g. `gh pr list`);
-- text that only *contains* `git push …` (scripts, string literals). Only real command lines count.
+A PR URL that only appears in a session's messages or tool output (`gh pr list`, a link you pasted) does not create
+a link.
 
 On a PR page, hover the chip, or open the `+N` menu, to see why each session is linked.
 
@@ -65,7 +63,7 @@ All data stays on your machine, in `chrome.storage.local`. The extension makes n
 
 ## Install
 
-Requirements: Chrome 120 or later (or Chromium, Brave, Edge, Arc), Node.js 18 or later, git, and the
+Requirements: Chrome 120 or later (or Chromium, Brave, Edge, Arc), Node.js 18 or later, and the
 [Claude desktop app](https://claude.ai/download) for the deep links.
 
 1. Load the extension: open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and select
@@ -76,7 +74,8 @@ Requirements: Chrome 120 or later (or Chromium, Brave, Edge, Arc), Node.js 18 or
    ```
    This writes `com.claude_link.host.json` into each installed browser's `NativeMessagingHosts` folder (on
    Windows, it adds registry keys under `HKCU`). It also writes a launcher in `host/.bin/` that pins the path of
-   the `node` you ran it with. If you use a custom `CLAUDE_CONFIG_DIR`, set it before you run the command.
+   the `node` you ran it with. If you use a custom `CLAUDE_CONFIG_DIR` (or `CLAUDE_APP_SESSIONS_DIR` for the Claude
+   app's session folder), set it before you run the command.
 3. Restart Chrome. Open the extension popup: the dot turns green and your sessions appear within a few seconds.
 
 To check that deep links open the Claude app, run `npm run demo-link`. It prints the link for your most recently
@@ -101,7 +100,7 @@ npm run icons      # regenerate icons/*.png
 manifest.json
 host/
   claude-link-host.js    native messaging host (stdio protocol)
-  scan.js                transcript discovery + incremental parsing
+  scan.js                transcript + Claude app session discovery and parsing
   install.js             registers the host with Chrome/Chromium/Brave/Edge/Arc
 src/
   background.js          service worker: polling, storage, lookups
@@ -115,9 +114,10 @@ e2e/run.js               browser end-to-end test
 
 ## Caveats
 
-- The transcript format isn't a documented API. The scanner relies only on `sessionId`, `cwd`, `gitBranch`,
-  `timestamp`, `message.content` and summary lines. A future Claude Code release could still change these.
-- GitHub's markup changes too. The PR-page code tries several selectors for the title and head branch. If it can't
-  find the title, the chip floats in the bottom-right corner instead.
+- Neither the transcript format nor the Claude app's session files are a documented API. The scanner relies only
+  on `cwd`, `timestamp`, title and `pr-link` lines in transcripts, and on `cliSessionId`, `cwd`, `title` and
+  `prs[].url` in app session files. A future release could change these.
+- GitHub's markup changes too. The PR-page code tries several selectors for the title. If it can't find it, the
+  chip floats in the bottom-right corner instead.
 - The Chrome Web Store doesn't accept a `key` in the manifest. Remove it before you upload, then run
   `install-host` with the store-assigned ID in `allowed_origins`.

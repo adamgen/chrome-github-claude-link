@@ -4,7 +4,7 @@
  * pages through request interception, and checks that local sessions are
  * picked up (including incrementally) and PR pages get Claude app deep links.
  *
- *   npm run test:e2e            (needs Playwright + Chromium + git)
+ *   npm run test:e2e            (needs Playwright + Chromium)
  *   E2E_SCREENSHOTS=dir npm run test:e2e
  */
 const path = require("node:path");
@@ -23,13 +23,14 @@ function loadPlaywright() {
 }
 
 const ROOT = path.resolve(__dirname, "..");
-const SESSION_A = "aaaaaaaa-0000-4000-8000-000000000001"; // opened PR #11 with gh pr create
-const SESSION_B = "bbbbbbbb-0000-4000-8000-000000000002"; // worked on claude/branch-b
+const SESSION_A = "aaaaaaaa-0000-4000-8000-000000000001"; // transcript has a pr-link entry for PR #11
+const SESSION_B = "bbbbbbbb-0000-4000-8000-000000000002"; // the Claude app's session file lists PR #13
 const SESSION_C = "session_01E2eBacklink000000003"; // cloud session, only linked from PR #12 body
-const SESSION_NOISE = "cccccccc-0000-4000-8000-000000000004"; // unrelated chat that sat on claude/branch-b
+const SESSION_NOISE = "cccccccc-0000-4000-8000-000000000004"; // PR URLs in its messages, but no pr-link entry
 
 const jsonl = (sessionId, cwd, entries) =>
   entries.map((e) => JSON.stringify({ sessionId, cwd, timestamp: "2026-10-01T10:00:00Z", ...e })).join("\n") + "\n";
+const prLink = (number) => ({ type: "pr-link", prNumber: number, prUrl: `https://github.com/acme/web/pull/${number}`, prRepository: "acme/web" });
 
 const html = (title, body) =>
   `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title></head><body>${body}</body></html>`;
@@ -73,42 +74,49 @@ async function main() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cgl-e2e-"));
   const userDataDir = path.join(tmp, "profile");
   const configDir = path.join(tmp, "claude-config");
+  const appSessionsDir = path.join(tmp, "claude-app", "claude-code-sessions");
   const cwd = path.join(tmp, "work", "web");
   const shotsDir = process.env.E2E_SCREENSHOTS;
 
-  // A git checkout of acme/web and two local Claude Code transcripts for it.
+  // A checkout of acme/web, local Claude Code transcripts for it, and the
+  // Claude app's metadata for one of them.
   fs.mkdirSync(cwd, { recursive: true });
-  execFileSync("git", ["init", "-q", cwd]);
-  execFileSync("git", ["-C", cwd, "remote", "add", "origin", "https://github.com/acme/web.git"]);
   const proj = path.join(configDir, "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"));
   fs.mkdirSync(proj, { recursive: true });
   fs.writeFileSync(
     path.join(proj, `${SESSION_A}.jsonl`),
     jsonl(SESSION_A, cwd, [
-      { type: "user", gitBranch: "main", message: { role: "user", content: "Add a dark mode toggle" } },
-      { type: "assistant", gitBranch: "claude/dark-mode", message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "gh pr create --fill" } }] } },
-      { type: "user", gitBranch: "claude/dark-mode", message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "https://github.com/acme/web/pull/11\n" }] } },
+      { type: "user", message: { role: "user", content: "Add a dark mode toggle" } },
+      { type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "gh pr create --fill" } }] } },
+      { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "https://github.com/acme/web/pull/11\n" }] } },
+      prLink(11),
       { type: "summary", summary: "Add dark mode" },
     ]),
   );
   const fileB = path.join(proj, `${SESSION_B}.jsonl`);
   fs.writeFileSync(
     fileB,
-    jsonl(SESSION_B, cwd, [
-      { type: "user", gitBranch: "claude/branch-b", message: { role: "user", content: "Fix the flaky login test" } },
-      { type: "assistant", gitBranch: "claude/branch-b", message: { content: [{ type: "tool_use", id: "e1", name: "Edit", input: { file_path: "login.test.js" } }] } },
-    ]),
+    jsonl(SESSION_B, cwd, [{ type: "user", message: { role: "user", content: "Fix the flaky login test" } }]),
   );
-  // Noise that must NOT be linked: a chat that only had claude/branch-b checked
-  // out, and listed every open PR.
+  fs.mkdirSync(path.join(appSessionsDir, "acct", "org"), { recursive: true });
+  fs.writeFileSync(
+    path.join(appSessionsDir, "acct", "org", "local_b.json"),
+    JSON.stringify({
+      sessionId: "local_b",
+      cliSessionId: SESSION_B,
+      cwd,
+      title: "Flaky login test",
+      prs: [{ prNumber: 13, url: "https://github.com/acme/web/pull/13", branch: "claude/branch-b", state: "OPEN" }],
+    }),
+  );
+  // Noise that must NOT be linked: PR URLs in tool output and messages, with no pr-link entry.
   fs.writeFileSync(
     path.join(proj, `${SESSION_NOISE}.jsonl`),
     jsonl(SESSION_NOISE, cwd, [
-      { type: "user", gitBranch: "claude/branch-b", message: { role: "user", content: "What does the auth module do?" } },
-      { type: "assistant", gitBranch: "claude/branch-b", message: { content: [{ type: "tool_use", id: "l1", name: "Bash", input: { command: "gh pr list" } }] } },
+      { type: "user", message: { role: "user", content: "What does https://github.com/acme/web/pull/13 change?" } },
+      { type: "assistant", message: { content: [{ type: "tool_use", id: "l1", name: "Bash", input: { command: "gh pr list" } }] } },
       {
         type: "user",
-        gitBranch: "claude/branch-b",
         message: { content: [{ type: "tool_result", tool_use_id: "l1", content: [11, 12, 13, 14].map((n) => `https://github.com/acme/web/pull/${n}`).join("\n") }] },
       },
     ]),
@@ -121,7 +129,7 @@ async function main() {
     path.join(userDataDir, "NativeMessagingHosts"),
     "--bin-dir",
     path.join(tmp, "bin"),
-  ], { env: { ...process.env, CLAUDE_CONFIG_DIR: configDir }, stdio: "ignore" });
+  ], { env: { ...process.env, CLAUDE_CONFIG_DIR: configDir, CLAUDE_APP_SESSIONS_DIR: appSessionsDir }, stdio: "ignore" });
 
   const executablePath = fs.existsSync("/opt/pw-browsers/chromium-1194/chrome-linux/chrome")
     ? "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
@@ -148,18 +156,17 @@ async function main() {
   // 1. The first scan runs on install, without any click.
   let db = await waitFor(async () => {
     const d = await getDb();
-    return d && d.sessions[SESSION_B] && d.prs["acme/web#11"] && d;
+    return d && d.prs["acme/web#13"] && d.prs["acme/web#11"] && d;
   }, "first scan").catch(async (e) => {
     console.error("last scan result:", await lastResult());
     throw e;
   });
-  assert.equal(db.prs["acme/web#11"].sessions[SESSION_A].kind, "created");
-  assert.ok(!Object.values(db.prs).some((p) => p.sessions[SESSION_NOISE]), "PR listing is not linked");
-  assert.deepEqual(db.sessions[SESSION_NOISE].branches, []);
+  assert.equal(db.prs["acme/web#11"].sessions[SESSION_A].kind, "linked");
+  assert.equal(db.prs["acme/web#13"].sessions[SESSION_B].kind, "linked");
+  assert.ok(!Object.values(db.prs).some((p) => p.sessions[SESSION_NOISE]), "PR URLs without a pr-link entry are not linked");
   assert.equal(db.sessions[SESSION_A].cwd, cwd);
-  assert.deepEqual(db.sessions[SESSION_A].repos, ["acme/web"]);
-  assert.deepEqual(db.sessions[SESSION_B].branches, ["claude/branch-b"]);
-  console.log("✓ local sessions read through the native host");
+  assert.equal(db.sessions[SESSION_B].appTitle, "Flaky login test");
+  console.log("✓ local sessions and Claude app metadata read through the native host");
 
   // 2. PR page links to the session with a Claude app deep link.
   const expectedA = `claude://resume?session=${SESSION_A}&cwd=${encodeURIComponent(cwd)}`;
@@ -173,12 +180,13 @@ async function main() {
   if (shotsDir) await gh.screenshot({ path: path.join(shotsDir, "pr-page.png") });
   console.log("✓ PR page has a claude://resume deep link");
 
-  // 3. Branch-only match.
+  // 3. PR linked only by the Claude app's metadata.
   await gh.goto("https://github.com/acme/web/pull/13");
   await gh.locator(".cgl-chip").waitFor({ timeout: 10000 });
   assert.match(await gh.locator(".cgl-chip").getAttribute("href"), new RegExp(`^claude://resume\\?session=${SESSION_B}`));
-  assert.equal(await gh.locator(".cgl-more").count(), 0, "the chat that only had the branch checked out is not linked");
-  console.log("✓ PR matched by head branch, unrelated chat on the same branch ignored");
+  assert.match(await gh.locator(".cgl-chip").innerText(), /Flaky login test/);
+  assert.equal(await gh.locator(".cgl-more").count(), 0, "the chat that only mentioned the PR is not linked");
+  console.log("✓ PR linked from the Claude app's session metadata, mentions ignored");
 
   // 4. Cloud-session backlink falls back to claude.ai.
   await gh.goto("https://github.com/acme/web/pull/12");
@@ -193,15 +201,10 @@ async function main() {
   await gh.waitForTimeout(1500);
   assert.equal(await gh.locator(".cgl-chip").count(), 0, "PR #14 has no session yet");
   const appendedAt = Date.now();
-  fs.appendFileSync(
-    fileB,
-    jsonl(SESSION_B, cwd, [
-      { type: "assistant", gitBranch: "claude/branch-b", message: { content: [{ type: "text", text: "Opened a PR: https://github.com/acme/web/pull/14" }] } },
-    ]),
-  );
+  fs.appendFileSync(fileB, jsonl(SESSION_B, cwd, [prLink(14)]));
   await gh.locator(".cgl-chip").waitFor({ timeout: 75000 });
   db = await getDb();
-  assert.equal(db.prs["acme/web#14"].sessions[SESSION_B].kind, "created");
+  assert.equal(db.prs["acme/web#14"].sessions[SESSION_B].kind, "linked");
   console.log(`✓ open PR page updated by itself ${Math.round((Date.now() - appendedAt) / 1000)}s after the transcript changed`);
 
   // 5b. If Chrome drops the alarm, opening a GitHub page restores it and rescans.
@@ -211,12 +214,7 @@ async function main() {
     scan.lastResult.at = 0; // pretend the last check was long ago
     await chrome.storage.local.set({ scan });
   });
-  fs.appendFileSync(
-    fileB,
-    jsonl(SESSION_B, cwd, [
-      { type: "assistant", gitBranch: "claude/branch-b", message: { content: [{ type: "text", text: "Opened a PR: https://github.com/acme/web/pull/15" }] } },
-    ]),
-  );
+  fs.appendFileSync(fileB, jsonl(SESSION_B, cwd, [prLink(15)]));
   await gh.goto("https://github.com/acme/web/pull/13");
   await waitFor(async () => (await getDb()).prs["acme/web#15"], "rescan triggered by a GitHub page");
   await waitFor(() => worker.evaluate(async () => !!(await chrome.alarms.get("cgl-poll"))), "alarm recreated");
@@ -245,13 +243,13 @@ async function main() {
   if (shotsDir) await popup.screenshot({ path: path.join(shotsDir, "popup.png") });
   console.log("✓ popup lists relations");
 
-  // 8. Upgrading from 0.2.0 (then restarting Chrome): links stored under the
-  //    old rules are dropped and rebuilt, and "mentioned" goes back to off.
+  // 8. Upgrading (then restarting Chrome): links stored under the old rules are
+  //    dropped and rebuilt, and the branch/mention switches are removed.
   await worker.evaluate(async () => {
     const { db } = await chrome.storage.local.get("db");
-    db.version = 1;
+    db.version = 2;
     db.prs["acme/web#500"] = { owner: "acme", repo: "web", number: 500, sessions: { stale: { kind: "branch", sources: ["local"] } } };
-    await chrome.storage.local.set({ db, settings: { pollSeconds: 30, matchBranch: true, showMentioned: true } });
+    await chrome.storage.local.set({ db, settings: { pollSeconds: 30, matchBranch: true, showMentioned: true, version: 2 } });
   });
   await context.close();
   context = await launch();
@@ -260,11 +258,12 @@ async function main() {
   const readStorage = (key) => worker.evaluate(async (k) => (await chrome.storage.local.get(k))[k], key);
   db = await waitFor(async () => {
     const d = await readStorage("db");
-    return d && d.version === 2 && d.prs["acme/web#11"] && d;
+    return d && d.version === 3 && d.prs["acme/web#11"] && d;
   }, "rebuilt db after upgrade");
   assert.equal(db.prs["acme/web#500"], undefined, "stale relation dropped");
   const settings = await readStorage("settings");
-  assert.equal(settings.showMentioned, undefined, "old showMentioned=true reset to the new default (off)");
+  assert.equal(settings.showMentioned, undefined, "showMentioned removed");
+  assert.equal(settings.matchBranch, undefined, "matchBranch removed");
   console.log("✓ upgrade drops old links and rebuilds them with the new rules");
 
   await context.close();

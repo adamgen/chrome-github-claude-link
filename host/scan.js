@@ -1,11 +1,16 @@
 /*
- * Reads Claude Code session transcripts from disk
- * (`$CLAUDE_CONFIG_DIR/projects/<project>/<session-id>.jsonl`, default
- * `~/.claude`) and reduces each one to what the extension needs: cwd, repo,
- * git branches, title and the GitHub PRs the session created or mentioned.
+ * Reads the PR links Claude Code and the Claude app already record, and the
+ * session details the extension shows next to them:
+ *
+ * - transcripts (`$CLAUDE_CONFIG_DIR/projects/<project>/<session-id>.jsonl`,
+ *   default `~/.claude`): cwd, title, first prompt, and the PRs in the
+ *   `{"type":"pr-link", prUrl, …}` entries Claude Code writes;
+ * - Claude app session files (`<app data>/Claude/claude-code-sessions/…/*.json`):
+ *   the app's title and the PRs in `prs[]`, keyed by `cliSessionId`.
  *
  * Transcripts are append-only, so a rescan reads only the bytes added since
- * the previous scan.
+ * the previous scan. App session files are small and rewritten in place, so a
+ * changed one is read whole.
  */
 "use strict";
 
@@ -13,22 +18,9 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const readline = require("node:readline");
-const { execFileSync } = require("node:child_process");
-const { classifyEventPrRefs, extractPrRefs, strongerKind, normalizeRepo } = require("../src/shared/core.js");
+const { parsePrUrl } = require("../src/shared/core.js");
 
 const MAX_PRS_PER_SESSION = 200;
-// Context injected into the transcript rather than produced by the session.
-const SKIPPED_TYPES = new Set(["attachment", "queue-operation", "file-history-snapshot"]);
-// File contents the session read or wrote are not things it did on GitHub.
-const FILE_TOOLS = new Set(["Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "Grep", "Glob"]);
-// Tools that change the working tree: using one means the session worked on the checked-out branch.
-const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
-// Matched against each shell command segment (see shellSegments), not the raw text,
-// so scripts that merely contain "git push" in a string do not count.
-const GIT_WORK_RE = /^(?:git(?:\s+-C\s+\S+)?\s+(?:commit|push|merge|rebase|cherry-pick|revert|am)|gh\s+pr\s+create)\b/;
-const BRANCH_RE = /^(?!\.|-)(?!.*\.\.)(?!.*\.lock$)[A-Za-z0-9._\/-]+$/;
-// One tool result or message listing more PRs than this is a listing (e.g. `gh pr list`), not a reference.
-const MAX_MENTIONS_PER_BLOCK = 3;
 
 function claudeConfigDir(env = process.env) {
   return env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
@@ -38,106 +30,63 @@ function projectsDir(env = process.env) {
   return path.join(claudeConfigDir(env), "projects");
 }
 
+/** Where the Claude desktop app keeps its Claude Code session metadata. */
+function appSessionsDir(env = process.env, platform = process.platform) {
+  if (env.CLAUDE_APP_SESSIONS_DIR) return env.CLAUDE_APP_SESSIONS_DIR;
+  const home = os.homedir();
+  const appData =
+    platform === "darwin"
+      ? path.join(home, "Library", "Application Support")
+      : platform === "win32"
+        ? env.APPDATA || path.join(home, "AppData", "Roaming")
+        : env.XDG_CONFIG_HOME || path.join(home, ".config");
+  return path.join(appData, "Claude", "claude-code-sessions");
+}
+
+function readDir(dir) {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true });
+  } catch (_) {
+    return [];
+  }
+}
+
 /** Every top-level `<session>.jsonl` under the projects dir. */
 function listSessionFiles(root) {
   const out = [];
-  let projects;
-  try {
-    projects = fs.readdirSync(root, { withFileTypes: true });
-  } catch (_) {
-    return out;
-  }
-  for (const p of projects) {
+  for (const p of readDir(root)) {
     if (!p.isDirectory()) continue;
     const dir = path.join(root, p.name);
-    let files;
-    try {
-      files = fs.readdirSync(dir, { withFileTypes: true });
-    } catch (_) {
-      continue;
-    }
-    for (const f of files) {
+    for (const f of readDir(dir)) {
       if (f.isFile() && f.name.endsWith(".jsonl")) out.push(path.join(dir, f.name));
     }
   }
   return out;
 }
 
-const repoCache = new Map();
-/** `owner/repo` of the cwd's `origin` remote, if it is a GitHub repo. */
-function repoForCwd(cwd) {
-  if (!cwd) return null;
-  if (repoCache.has(cwd)) return repoCache.get(cwd);
-  let repo = null;
-  try {
-    if (fs.existsSync(cwd)) {
-      const url = execFileSync("git", ["-C", cwd, "remote", "get-url", "origin"], {
-        encoding: "utf8",
-        timeout: 3000,
-        stdio: ["ignore", "pipe", "ignore"],
-      });
-      repo = normalizeRepo(url.trim());
-    }
-  } catch (_) {
-    // not a git repo / no origin / git missing
-  }
-  repoCache.set(cwd, repo);
-  return repo;
-}
-
-function contentBlocks(entry) {
-  const c = entry && entry.message && entry.message.content;
-  return Array.isArray(c) ? c.filter((b) => b && typeof b === "object") : [];
-}
-
-function isCreatePrCall(block) {
-  if (/create_pull_request/i.test(block.name || "")) return true;
-  return /\bgh\s+pr\s+create\b/.test(JSON.stringify(block.input || ""));
-}
-
-function mentions(text) {
-  const refs = extractPrRefs(text);
-  if (refs.length > MAX_MENTIONS_PER_BLOCK) return [];
-  return refs.map((r) => ({ ...r, kind: "mentioned" }));
-}
-
-/** The individual commands of a shell command line (split on newlines, &&, ||, ;, |). */
-function shellSegments(command) {
-  return String(command || "")
-    .split(/\n|&&|\|\||;|\|/)
-    .map((seg) => seg.trim())
-    .filter(Boolean);
-}
-
-function isGitWork(command) {
-  return shellSegments(command).some((seg) => GIT_WORK_RE.test(seg));
-}
-
-/** Branches named as push targets in a shell command (`git push -u origin feat/x`, `HEAD:feat/x`). */
-function pushedBranches(command) {
+/** Every `*.json` under the app sessions dir (`<account>/<org>/local_<id>.json`). */
+function listAppSessionFiles(root, depth = 3) {
   const out = [];
-  for (const seg of shellSegments(command)) {
-    const m = /^git(?:\s+-C\s+\S+)?\s+push\b(.*)$/.exec(seg);
-    if (!m) continue;
-    // Stop at the first token that is not a plain flag/remote/refspec: past it
-    // we are reading quoted text or code, not git arguments.
-    const tokens = m[1].trim().split(/\s+/).filter(Boolean);
-    const end = tokens.findIndex((t) => !/^[A-Za-z0-9._\/:+=-]+$/.test(t));
-    const args = (end < 0 ? tokens : tokens.slice(0, end)).filter((a) => !a.startsWith("-"));
-    for (const refspec of args.slice(1)) {
-      const dst = refspec.includes(":") ? refspec.slice(refspec.indexOf(":") + 1) : refspec;
-      const branch = dst.replace(/^\+/, "").replace(/^refs\/heads\//, "");
-      if (branch !== "HEAD" && BRANCH_RE.test(branch)) out.push(branch);
-    }
+  for (const e of readDir(root)) {
+    const p = path.join(root, e.name);
+    if (e.isDirectory() && depth > 0) out.push(...listAppSessionFiles(p, depth - 1));
+    else if (e.isFile() && e.name.endsWith(".json")) out.push(p);
   }
   return out;
 }
 
-/** The PR a create-PR tool result is about: its `url`/`html_url`, else the only/first PR URL. */
-function createdPr(resultText) {
-  const own = /"(?:html_)?url\\?"\s*:\s*\\?"(https:\/\/github\.com\/[^"\\]+\/pull\/\d+)/.exec(resultText);
-  const refs = extractPrRefs(own ? own[1] : resultText);
-  return refs.length ? [{ ...refs[0], kind: "created" }] : [];
+/** `{ owner, repo, number, kind: "linked" }` for a PR URL, else null. */
+function linkedPr(url) {
+  const pr = parsePrUrl(url, { allowSubpath: false });
+  return pr ? { ...pr, kind: "linked" } : null;
+}
+
+function uniquePrs(prs) {
+  const out = new Map();
+  for (const pr of prs) {
+    if (pr) out.set(`${pr.owner}/${pr.repo}#${pr.number}`.toLowerCase(), pr);
+  }
+  return [...out.values()].slice(0, MAX_PRS_PER_SESSION);
 }
 
 function promptText(entry) {
@@ -163,24 +112,13 @@ function promptText(entry) {
 async function parseSessionFile(file, start = 0) {
   const id = path.basename(file, ".jsonl");
   const result = {
-    // `branches`: branches the session did work on (edited files, committed or pushed), not merely had checked out.
-    session: { id, cwd: null, title: null, firstPrompt: null, branches: [], repos: [], updatedAt: null, source: "local" },
+    session: { id, cwd: null, title: null, firstPrompt: null, updatedAt: null, source: "local" },
     prs: [],
     end: start,
   };
-  const branches = new Set();
-  const prs = new Map();
-  const createCalls = new Set();
-  const toolNames = new Map();
+  const prs = [];
   let customTitle = null;
   let summary = null;
-
-  const addRefs = (refs) => {
-    for (const ref of refs) {
-      const prev = prs.get(ref.key);
-      prs.set(ref.key, prev ? { ...ref, kind: strongerKind(prev.kind, ref.kind) } : ref);
-    }
-  };
 
   const stream = fs.createReadStream(file, { start, encoding: "utf8" });
   const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
@@ -209,30 +147,9 @@ async function parseSessionFile(file, start = 0) {
     if (entry.customTitle) customTitle = String(entry.customTitle);
     if (entry.aiTitle) summary = String(entry.aiTitle);
     if (entry.type === "summary" && entry.summary) summary = String(entry.summary);
+    if (entry.type === "pr-link") prs.push(linkedPr(entry.prUrl));
     // Only a scan from the top of the file knows which prompt came first.
     if (start === 0 && !result.session.firstPrompt) result.session.firstPrompt = promptText(entry);
-
-    if (SKIPPED_TYPES.has(entry.type)) continue;
-    if (!line.includes("/pull/") && !line.includes('"tool_use"')) continue;
-    const content = entry.message && entry.message.content;
-    if (typeof content === "string") addRefs(mentions(content));
-    for (const block of contentBlocks(entry)) {
-      if (block.type === "text") {
-        addRefs(classifyEventPrRefs(block.text || ""));
-      } else if (block.type === "tool_use" && block.id) {
-        toolNames.set(block.id, block.name || "");
-        const command = (block.input && block.input.command) || "";
-        const onBranch = entry.gitBranch && entry.gitBranch !== "HEAD" ? entry.gitBranch : null;
-        if (onBranch && (WRITE_TOOLS.has(block.name) || isGitWork(command))) branches.add(onBranch);
-        for (const b of pushedBranches(command)) branches.add(b);
-        if (isCreatePrCall(block)) createCalls.add(block.id);
-        if (!FILE_TOOLS.has(block.name)) addRefs(mentions(JSON.stringify(block.input || "")));
-      } else if (block.type === "tool_result") {
-        const text = JSON.stringify(block.content || "");
-        if (createCalls.has(block.tool_use_id)) addRefs(createdPr(text));
-        else if (!FILE_TOOLS.has(toolNames.get(block.tool_use_id))) addRefs(mentions(text));
-      }
-    }
   }
   rl.close();
   stream.destroy();
@@ -243,27 +160,48 @@ async function parseSessionFile(file, start = 0) {
   result.end = badLineStart >= 0 ? badLineStart : Math.min(consumed, size);
 
   result.session.title = customTitle || summary;
-  result.session.branches = [...branches];
-  const repo = repoForCwd(result.session.cwd);
-  if (repo) result.session.repos = [repo];
-  result.prs = [...prs.values()].slice(0, MAX_PRS_PER_SESSION).map(({ owner, repo: r, number, kind }) => ({ owner, repo: r, number, kind }));
+  result.prs = uniquePrs(prs);
   return result;
 }
 
 /**
+ * Parse one Claude app session file. Returns null when it is not tied to a
+ * local Claude Code session (no `cliSessionId`) or is unreadable.
+ */
+function parseAppSessionFile(file) {
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (_) {
+    return null;
+  }
+  if (!data || typeof data !== "object" || !data.cliSessionId) return null;
+  const urls = [...(Array.isArray(data.prs) ? data.prs.map((p) => p && p.url) : []), data.prUrl];
+  return {
+    // `appTitle`: the title the Claude app shows, which the user may have renamed.
+    session: { id: String(data.cliSessionId), cwd: data.cwd || null, appTitle: data.title || null },
+    prs: uniquePrs(urls.map(linkedPr)),
+  };
+}
+
+function statOrNull(file) {
+  try {
+    return fs.statSync(file);
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
  * Scan every transcript that changed since `known` ({ [file]: {size, mtimeMs} }).
- * Calls `onSession(file, stat, parsed)` for each changed file.
+ * Calls `onSession(file, stat, parsed, start)` for each changed file.
  */
 async function scanProjects(root, known = {}, onSession = () => {}) {
   const files = listSessionFiles(root);
   let changed = 0;
   for (const file of files) {
-    let stat;
-    try {
-      stat = fs.statSync(file);
-    } catch (_) {
-      continue;
-    }
+    const stat = statOrNull(file);
+    if (!stat) continue;
     const prev = known[file];
     if (prev && prev.size === stat.size && prev.mtimeMs === stat.mtimeMs) continue;
     const start = prev && stat.size > prev.size ? prev.size : 0;
@@ -279,4 +217,31 @@ async function scanProjects(root, known = {}, onSession = () => {}) {
   return { files: files.length, changed };
 }
 
-module.exports = { claudeConfigDir, projectsDir, listSessionFiles, parseSessionFile, scanProjects, repoForCwd, pushedBranches, createdPr };
+/** Like scanProjects, for the Claude app's session files. */
+async function scanAppSessions(root, known = {}, onSession = () => {}) {
+  const files = listAppSessionFiles(root);
+  let changed = 0;
+  for (const file of files) {
+    const stat = statOrNull(file);
+    if (!stat) continue;
+    const prev = known[file];
+    if (prev && prev.size === stat.size && prev.mtimeMs === stat.mtimeMs) continue;
+    const parsed = parseAppSessionFile(file);
+    if (parsed) changed++;
+    // Remember files without a CLI session too, so they are not re-read every time.
+    await onSession(file, { size: stat.size, mtimeMs: stat.mtimeMs }, parsed, 0);
+  }
+  return { files: files.length, changed };
+}
+
+module.exports = {
+  claudeConfigDir,
+  projectsDir,
+  appSessionsDir,
+  listSessionFiles,
+  listAppSessionFiles,
+  parseSessionFile,
+  parseAppSessionFile,
+  scanProjects,
+  scanAppSessions,
+};

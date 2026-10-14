@@ -13,10 +13,8 @@
   const { parsePrUrl, prKey, extractSessionLinks } = globalThis.CGL;
 
   const KIND_LABEL = {
-    branch: "pushed to this PR's branch",
-    created: "opened this PR",
-    backlink: "linked from this PR",
-    mentioned: "mentions this PR",
+    linked: "worked on this PR",
+    backlink: "is linked from this PR",
   };
 
   const ICON_SVG =
@@ -42,7 +40,7 @@
   let generation = 0;
 
   async function lookupMany(prs) {
-    const missing = prs.filter((p) => !cache.has(prKey(p.owner, p.repo, p.number)) || p.headBranch);
+    const missing = prs.filter((p) => !cache.has(prKey(p.owner, p.repo, p.number)));
     if (missing.length) {
       const gen = generation;
       const pending = send({ type: "cgl:lookup", prs: missing });
@@ -74,35 +72,6 @@
   function currentPr() {
     const m = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|$)/.exec(location.pathname);
     return m ? { owner: m[1], repo: m[2], number: Number(m[3]) } : null;
-  }
-
-  function cleanBranch(text) {
-    if (!text) return null;
-    let b = String(text).trim().split(/\s+/)[0];
-    // "owner:branch" / "owner/repo:branch" for cross-repo PRs.
-    const colon = b.lastIndexOf(":");
-    if (colon >= 0) b = b.slice(colon + 1);
-    return b || null;
-  }
-
-  function headBranch() {
-    const selectors = [
-      ".gh-header-meta .head-ref",
-      ".commit-ref.head-ref",
-      "span.head-ref",
-      '[data-testid="head-ref"]',
-      '[class*="PullRequestHeaderSummary"] [class*="BranchName"]:last-of-type',
-    ];
-    for (const sel of selectors) {
-      const el = document.querySelector(sel);
-      if (!el) continue;
-      const b = cleanBranch(el.getAttribute("title") || el.textContent);
-      if (b) return b;
-    }
-    // Fallback: "… wants to merge 3 commits into main from claude/foo"
-    const header = document.querySelector("#partial-discussion-header, main header, main") || document.body;
-    const m = /\binto\s+(\S+)\s+from\s+(\S+)/.exec((header.innerText || "").slice(0, 4000));
-    return m ? cleanBranch(m[2]) : null;
   }
 
   function collectBacklinks(pr) {
@@ -213,8 +182,7 @@
       headerState = { key, sig: null };
       await collectBacklinks(pr);
     }
-    const branch = headBranch();
-    const results = await lookupMany([{ ...pr, headBranch: branch }]);
+    const results = await lookupMany([pr]);
     const now = currentPr();
     if (!now || prKey(now.owner, now.repo, now.number) !== key) return; // navigated away meanwhile
     const sessions = results[key] || [];

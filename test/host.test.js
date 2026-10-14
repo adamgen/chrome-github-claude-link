@@ -43,16 +43,30 @@ test("native host answers ping and streams a scan", async () => {
   const id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
   fs.writeFileSync(
     path.join(proj, `${id}.jsonl`),
-    JSON.stringify({ type: "assistant", sessionId: id, cwd: "/w", message: { content: [{ type: "text", text: "https://github.com/a/b/pull/3" }] } }) + "\n",
+    JSON.stringify({ type: "user", sessionId: id, cwd: "/w", message: { content: "hi" } }) +
+      "\n" +
+      JSON.stringify({ type: "pr-link", sessionId: id, prNumber: 3, prUrl: "https://github.com/a/b/pull/3" }) +
+      "\n",
   );
-  const out = await talk({ CLAUDE_CONFIG_DIR: config }, [{ type: "ping" }, { type: "scan", known: {} }], "done");
+  const appDir = path.join(config, "app", "acct", "org");
+  fs.mkdirSync(appDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(appDir, "local_x.json"),
+    JSON.stringify({ cliSessionId: id, title: "From the app", prs: [{ url: "https://github.com/a/b/pull/4" }] }),
+  );
+  const env = { CLAUDE_CONFIG_DIR: config, CLAUDE_APP_SESSIONS_DIR: path.join(config, "app") };
+  const out = await talk(env, [{ type: "ping" }, { type: "scan", known: {} }], "done");
   assert.equal(out[0].type, "pong");
   assert.equal(out[0].projectsDir, path.join(config, "projects"));
+  assert.equal(out[0].appSessionsDir, path.join(config, "app"));
   assert.equal(out[1].type, "session");
   assert.equal(out[1].session.id, id);
-  assert.deepEqual(out[1].prs, [{ owner: "a", repo: "b", number: 3, kind: "mentioned" }]);
-  assert.equal(out[2].type, "done");
-  assert.equal(out[2].changed, 1);
+  assert.deepEqual(out[1].prs, [{ owner: "a", repo: "b", number: 3, kind: "linked" }]);
+  assert.equal(out[2].type, "session");
+  assert.deepEqual(out[2].session, { id, cwd: null, appTitle: "From the app" });
+  assert.deepEqual(out[2].prs, [{ owner: "a", repo: "b", number: 4, kind: "linked" }]);
+  assert.equal(out[3].type, "done");
+  assert.equal(out[3].changed, 2);
 });
 
 test("extension id is derived from the manifest key", () => {

@@ -2,18 +2,20 @@
 /*
  * Chrome native messaging host for the Claude Code ↔ GitHub PR Link
  * extension. Chrome starts it on demand; it reads local Claude Code
- * transcripts and streams one message per changed session back.
+ * transcripts and Claude app session files, and streams one message per
+ * changed file back.
  *
  * Protocol (both directions): 4-byte little-endian length + UTF-8 JSON.
- *   → { type: "ping" }                      ← { type: "pong", version, projectsDir }
+ *   → { type: "ping" }                      ← { type: "pong", version, projectsDir, appSessionsDir }
  *   → { type: "scan", known: {file: {size, mtimeMs}} }
- *                                           ← { type: "session", file, stat, session, prs, full }  (×N)
+ *                                           ← { type: "session", file, stat, session, prs, full }  (×N;
+ *                                              session is null for app files without a CLI session)
  *                                           ← { type: "done", files, changed, ms }
  *   any failure                             ← { type: "error", error }
  */
 "use strict";
 
-const { projectsDir, scanProjects } = require("./scan.js");
+const { projectsDir, appSessionsDir, scanProjects, scanAppSessions } = require("./scan.js");
 const { version } = require("../package.json");
 
 function send(obj) {
@@ -28,13 +30,22 @@ function send(obj) {
 
 async function handle(msg) {
   const root = projectsDir();
-  if (msg.type === "ping") return send({ type: "pong", version, projectsDir: root });
+  const appRoot = appSessionsDir();
+  if (msg.type === "ping") return send({ type: "pong", version, projectsDir: root, appSessionsDir: appRoot });
   if (msg.type === "scan") {
     const started = Date.now();
-    const res = await scanProjects(root, msg.known || {}, (file, stat, parsed, start) =>
-      send({ type: "session", file, stat, session: parsed.session, prs: parsed.prs, full: start === 0 }),
-    );
-    return send({ type: "done", ...res, projectsDir: root, ms: Date.now() - started });
+    const onSession = (file, stat, parsed, start) =>
+      send({ type: "session", file, stat, session: parsed ? parsed.session : null, prs: parsed ? parsed.prs : [], full: start === 0 });
+    const transcripts = await scanProjects(root, msg.known || {}, onSession);
+    const app = await scanAppSessions(appRoot, msg.known || {}, onSession);
+    return send({
+      type: "done",
+      files: transcripts.files + app.files,
+      changed: transcripts.changed + app.changed,
+      projectsDir: root,
+      appSessionsDir: appRoot,
+      ms: Date.now() - started,
+    });
   }
   return send({ type: "error", error: `unknown message type: ${msg.type}` });
 }
